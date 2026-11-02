@@ -7,7 +7,7 @@ python-dotenv>=1.0.0
 ddgs
 gTTS
 google-genai>=1.0.0
-
+requests>=2.32.0
 # Local Zi AI Animator (LTX-Video)
 diffusers>=0.33.0
 accelerate>=1.2.0
