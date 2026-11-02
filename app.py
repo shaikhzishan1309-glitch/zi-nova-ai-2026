@@ -919,140 +919,153 @@ def generate_pollinations_image(prompt, aspect_ratio="1:1"):
 
 
 # ============================================================
-# LOCAL AI VIDEO GENERATION (NO API KEY)
+# MAGIC HOUR HOSTED VIDEO GENERATION — LTX-2.5
 # ============================================================
 
-@st.cache_resource(show_spinner=False)
-def load_ltx_video_pipeline(mode="text"):
-    """Load and cache LTX-Video once per generation mode.
-
-    Fast inference requires a CUDA GPU. CPU-only Streamlit instances are
-    rejected early rather than appearing to hang for hours.
-    """
-    import torch
-    from huggingface_hub import snapshot_download
-    from diffusers import LTXPipeline, LTXImageToVideoPipeline
-
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "This runtime has no CUDA GPU. LTX-Video on CPU is extremely slow "
-            "and may take hours per clip. Streamlit Cloud CPU cannot provide "
-            "fast local video generation. Run this app on a CUDA-enabled GPU "
-            "machine to use the local LTX Animator."
-        )
-
-    # Enable faster CUDA kernels where supported.
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    dtype = torch.float16
-    model_id = os.getenv("ZI_VIDEO_MODEL", "Lightricks/LTX-Video").strip()
-    pipeline_class = (
-        LTXImageToVideoPipeline if mode == "image" else LTXPipeline
-    )
-
-    def _load(source, force_download=False):
-        return pipeline_class.from_pretrained(
-            source,
-            torch_dtype=dtype,
-            force_download=force_download,
-            use_safetensors=True,
-        )
-
-    try:
-        pipe = _load(model_id)
-    except Exception as first_error:
-        message = str(first_error).lower()
-        cache_related = any(term in message for term in (
-            "spiece.model", "error parsing line", "protobuf", "sentencepiece",
-            "incomplete", "corrupt", "invalid magic", "not a valid"
-        ))
-        if not cache_related:
-            raise RuntimeError(
-                f"Could not load {model_id}: {first_error}"
-            ) from first_error
-
+def get_magic_hour_api_key():
+    """Read the Magic Hour key from Streamlit Secrets or environment."""
+    key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
+    if not key:
         try:
-            local_snapshot = snapshot_download(
-                repo_id=model_id,
-                force_download=True,
-                resume_download=True,
-            )
-            pipe = _load(local_snapshot)
-        except Exception as retry_error:
-            raise RuntimeError(
-                "LTX-Video files appear corrupted or the download was "
-                f"interrupted. Fresh download failed: {retry_error}"
-            ) from retry_error
-
-    # Keep weights on GPU for faster repeated inference when VRAM permits.
-    # Fall back to model CPU offload if the full pipeline cannot fit.
-    try:
-        pipe.to("cuda")
-    except (RuntimeError, torch.cuda.OutOfMemoryError):
-        torch.cuda.empty_cache()
-        pipe.enable_model_cpu_offload()
-
-    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
-        pipe.vae.enable_slicing()
-    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        pipe.vae.enable_tiling()
-    return pipe
+            key = str(st.secrets.get("MAGIC_HOUR_API_KEY", "")).strip()
+        except Exception:
+            key = ""
+    return key
 
 
-def generate_local_video(prompt, mode="text", source_image=None,
-                         width=384, height=384, frames=17,
-                         steps=8, guidance=3.0):
-    """Generate a short MP4 with reduced-cost LTX settings."""
-    import torch
-    from diffusers.utils import export_to_video
+def _find_mp4_file(folder):
+    for root, _, files in os.walk(folder):
+        for filename in files:
+            if filename.lower().endswith(".mp4"):
+                return os.path.join(root, filename)
+    return None
 
-    pipe = load_ltx_video_pipeline(mode)
-    kwargs = {
-        "prompt": prompt,
-        "width": int(width),
-        "height": int(height),
-        "num_frames": int(frames),
-        "num_inference_steps": int(steps),
-        "guidance_scale": float(guidance),
-    }
-    if mode == "image":
-        if source_image is None:
-            raise ValueError("Upload a starting image for image-to-video.")
+
+def _find_download_url(value):
+    """Best-effort extraction for SDK versions returning a download URL."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in {"url", "download_url", "video_url"} and isinstance(item, str) and item.startswith("http"):
+                return item
+            found = _find_download_url(item)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_download_url(item)
+            if found:
+                return found
+    elif hasattr(value, "model_dump"):
         try:
-            if isinstance(source_image, Image.Image):
-                pil_source = source_image.copy()
-            elif hasattr(source_image, "getvalue"):
-                pil_source = Image.open(io.BytesIO(source_image.getvalue()))
-            elif hasattr(source_image, "read"):
-                source_image.seek(0)
-                pil_source = Image.open(io.BytesIO(source_image.read()))
-            else:
-                raise TypeError("Unsupported image upload object.")
-            pil_source.load()
-            kwargs["image"] = ImageOps.exif_transpose(pil_source).convert("RGB")
-        except Exception as exc:
-            raise ValueError(
-                "Could not decode the uploaded starting image. "
-                "Please upload a valid PNG, JPG or WEBP image."
-            ) from exc
-
-    # Disable gradient tracking; inference does not need autograd.
-    with torch.inference_mode():
-        result = pipe(**kwargs)
-
-    video_frames = result.frames[0]
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp:
-        output_path = temp.name
-    try:
-        export_to_video(video_frames, output_path, fps=8)
-        with open(output_path, "rb") as f:
-            return f.read()
-    finally:
-        try:
-            os.remove(output_path)
-        except OSError:
+            return _find_download_url(value.model_dump())
+        except Exception:
             pass
+    elif hasattr(value, "__dict__"):
+        return _find_download_url(vars(value))
+    return None
+
+
+def generate_magic_hour_video(prompt, mode="text", source_image=None,
+                              duration=5, resolution="480p",
+                              orientation="landscape", audio=True):
+    """Generate an MP4 through Magic Hour's hosted LTX-2.5 API.
+
+    No local Diffusers/PyTorch video model is loaded. Magic Hour handles
+    GPU inference. The API key must be in Streamlit Secrets or environment.
+    """
+    api_key = get_magic_hour_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "Magic Hour API key is missing. Add MAGIC_HOUR_API_KEY to "
+            "Streamlit Cloud → App settings → Secrets. Do not put the key in app.py."
+        )
+
+    if not prompt or not prompt.strip():
+        raise ValueError("Enter a video prompt first.")
+
+    try:
+        from magic_hour import Client
+    except ImportError as exc:
+        raise RuntimeError(
+            "Magic Hour SDK is not installed. Add magic-hour to requirements.txt "
+            "and redeploy the app."
+        ) from exc
+
+    client = Client(token=api_key)
+    duration = int(duration)
+    if duration < 1 or duration > 60:
+        raise ValueError("Video duration must be between 1 and 60 seconds.")
+
+    with tempfile.TemporaryDirectory(prefix="zi_magic_hour_") as workdir:
+        common = {
+            "end_seconds": float(duration),
+            "name": "Zi Nova AI - LTX-2.5",
+            "model": "ltx-2.5",
+            "resolution": resolution,
+            "audio": bool(audio),
+            "wait_for_completion": True,
+            "download_outputs": True,
+            "download_directory": workdir,
+        }
+
+        try:
+            if mode == "image":
+                if source_image is None:
+                    raise ValueError("Upload a starting image for image-to-video.")
+                try:
+                    if isinstance(source_image, Image.Image):
+                        pil_image = source_image.copy()
+                    elif hasattr(source_image, "getvalue"):
+                        pil_image = Image.open(io.BytesIO(source_image.getvalue()))
+                    else:
+                        source_image.seek(0)
+                        pil_image = Image.open(io.BytesIO(source_image.read()))
+                    pil_image = ImageOps.exif_transpose(pil_image).convert("RGB")
+                    image_path = os.path.join(workdir, "starting_frame.png")
+                    pil_image.save(image_path, format="PNG")
+                except Exception as exc:
+                    raise ValueError(
+                        "Could not read the uploaded image. Use a valid PNG, JPG or WEBP."
+                    ) from exc
+
+                result = client.v1.image_to_video.generate(
+                    assets={"image_file_path": image_path},
+                    style={"prompt": prompt.strip()},
+                    **common,
+                )
+            else:
+                result = client.v1.text_to_video.generate(
+                    orientation=orientation,
+                    style={"prompt": prompt.strip()},
+                    **common,
+                )
+        except Exception as exc:
+            message = str(exc)
+            if "401" in message or "Unauthorized" in message:
+                raise RuntimeError("Magic Hour rejected the API key (401). Check MAGIC_HOUR_API_KEY.") from exc
+            if "402" in message or "Payment required" in message:
+                raise RuntimeError("Magic Hour credits are insufficient (402). Check your API balance before retrying.") from exc
+            if "422" in message:
+                raise RuntimeError(f"Magic Hour rejected the request parameters (422): {message}") from exc
+            raise RuntimeError(f"Magic Hour video generation failed: {message}") from exc
+
+        mp4_path = _find_mp4_file(workdir)
+        if mp4_path:
+            with open(mp4_path, "rb") as video_file:
+                return video_file.read()
+
+        download_url = _find_download_url(result)
+        if download_url:
+            response = requests.get(download_url, timeout=180)
+            response.raise_for_status()
+            if not response.content:
+                raise RuntimeError("Magic Hour returned an empty video file.")
+            return response.content
+
+        raise RuntimeError(
+            "Magic Hour job completed, but the SDK did not provide a downloaded MP4. "
+            "Check the SDK version and job result in the Magic Hour dashboard."
+        )
 
 
 # ============================================================
@@ -2458,13 +2471,14 @@ elif st.session_state.page == "Zi AI Assistant":
 
 
     # --------------------------------------------------------
-    # 16D. ZI AI ANIMATOR — LOCAL TEXT-TO-VIDEO + IMAGE-TO-VIDEO
+    # 16D. ZI AI ANIMATOR — MAGIC HOUR LTX-2.5 API
     # --------------------------------------------------------
 
     with animator_tab:
         st.title("🎬 Zi AI Animator")
-        st.caption("LTX-Video local inference. No video API key or paid generation service.")
-        st.info("Fast generation requires a CUDA GPU. CPU-only Streamlit Cloud instances cannot generate LTX videos quickly. The first GPU run also downloads model weights.")
+        st.caption("Hosted video generation powered by Magic Hour LTX-2.5. No local GPU or Diffusers model required.")
+        if not get_magic_hour_api_key():
+            st.warning("Add MAGIC_HOUR_API_KEY in Streamlit Cloud → App settings → Secrets to enable video generation.")
 
         mode = st.radio(
             "Generation mode",
@@ -2490,32 +2504,31 @@ elif st.session_state.page == "Zi AI Assistant":
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            video_size = st.selectbox("Resolution", ["384 × 384", "512 × 512", "768 × 512", "512 × 768"], index=0, key="zi_animator_resolution")
+            video_duration = st.selectbox("Duration", [5, 6, 8, 10], index=0, key="zi_animator_duration")
         with c2:
-            video_frames = st.selectbox("Frames", [17, 25, 33, 49], index=0, key="zi_animator_frames")
+            video_resolution = st.selectbox("Resolution", ["480p", "720p", "1080p"], index=0, key="zi_animator_api_resolution")
         with c3:
-            video_steps = st.selectbox("Quality steps", [4, 6, 8, 10, 15, 20], index=2, key="zi_animator_steps")
+            video_orientation = st.selectbox("Orientation", ["landscape", "portrait"], index=0, key="zi_animator_orientation")
 
-        width, height = [int(v.strip()) for v in video_size.split("×")]
+        audio_enabled = st.checkbox("Generate audio", value=True, key="zi_animator_audio")
         can_generate_video = bool(video_prompt.strip()) and (mode == "Text-to-Video" or start_image is not None)
         if st.button("🚀 Generate Video", type="primary", use_container_width=True, disabled=not can_generate_video, key="zi_animator_generate"):
             try:
-                with st.spinner("Preparing the LTX model and generating a short video..."):
-                    # Reduced default workload: 384px, 17 frames, 8 steps.
-                    video_data = generate_local_video(
+                with st.spinner("Sending your request to Magic Hour LTX-2.5. Generation runs on hosted GPUs..."):
+                    video_data = generate_magic_hour_video(
                         video_prompt,
                         mode="image" if mode == "Image-to-Video" else "text",
                         source_image=start_image,
-                        width=width,
-                        height=height,
-                        frames=video_frames,
-                        steps=video_steps,
+                        duration=video_duration,
+                        resolution=video_resolution,
+                        orientation=video_orientation,
+                        audio=audio_enabled,
                     )
                 st.session_state.zi_animator_video = video_data
-                st.success("Video generated.")
+                st.success("Video generated successfully.")
             except Exception as error:
-                st.error(f"Local video generation failed: {error}")
-                st.caption("Check the error details. The model requires compatible Diffusers/PyTorch versions and sufficient system resources.")
+                st.error(f"Video generation failed: {error}")
+                st.caption("Check your Magic Hour API key, available credits, model access and selected settings.")
 
         if st.session_state.get("zi_animator_video"):
             st.divider()
