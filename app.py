@@ -1,13 +1,18 @@
 import os
 import io
 import base64
+import json
+import requests
+import tempfile
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 from dotenv import load_dotenv
 from groq import Groq
 from gtts import gTTS
+from google import genai
 
 
 # ============================================================
@@ -21,6 +26,13 @@ LOGO_PATH = ASSETS_DIR / "zinova_ai_logo.png"
 load_dotenv(BASE_DIR / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image").strip()
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
+POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 
 TEXT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
@@ -48,8 +60,13 @@ DEFAULTS = {
     "last_sources": [],
     "caption_result": None,
     "caption_sources": [],
+    "generated_image": None,
     "reducer_result": None,
-    "voice_result": None
+    "voice_result": None,
+    "assistant_tab": "Chat Assistant",
+    "chat_image": None,
+    "chat_input_counter": 0,
+    "zi_animator_video": None
 }
 
 for key, value in DEFAULTS.items():
@@ -135,8 +152,6 @@ st.markdown(
         padding-bottom: 3rem;
     }}
 
-    /* TOP HEADER */
-
     header[data-testid="stHeader"] {{
         background: {T["bg"]} !important;
         border-bottom: 1px solid {T["border"]} !important;
@@ -166,8 +181,6 @@ st.markdown(
     [data-testid="stSidebar"] > div:first-child {{
         background: #05080F !important;
     }}
-
-    /* WORKSPACE NAVIGATION */
 
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {{
         color: #303544 !important;
@@ -257,8 +270,6 @@ st.markdown(
         margin: auto;
     }}
 
-    /* CARDS */
-
     .section-heading {{
         color: {T["text"]};
         font-size: 22px;
@@ -303,8 +314,6 @@ st.markdown(
         color: {T["accent"]};
     }}
 
-    /* ASSISTANT MODE CARDS */
-
     .mode-card {{
         background: linear-gradient(145deg,#10243C,#142E4A);
         border: 1px solid #355575;
@@ -325,8 +334,6 @@ st.markdown(
         line-height: 1.6;
     }}
 
-    /* BUTTONS */
-
     .stButton > button,
     .stDownloadButton > button {{
         background: linear-gradient(110deg,#1689C8,#32B9E9);
@@ -342,8 +349,6 @@ st.markdown(
         border-color: #8BE0FF;
         color: white;
     }}
-
-    /* INPUTS */
 
     .stTextInput input,
     .stTextArea textarea {{
@@ -367,10 +372,42 @@ st.markdown(
         margin-bottom: 10px;
     }}
 
-    [data-testid="stChatInput"] {{
+    /* CHAT INPUT — FORCE READABLE TEXT IN ALL STREAMLIT THEMES */
+    [data-testid="stChatInput"],
+    [data-testid="stChatInput"] > div,
+    [data-testid="stChatInput"] [data-baseweb="textarea"],
+    [data-testid="stChatInput"] [data-baseweb="base-input"] {{
         background: {T["surface"]} !important;
         border: 1px solid {T["border"]} !important;
-        border-radius: 14px !important;
+        border-radius: 16px !important;
+        box-shadow: none !important;
+    }}
+
+    [data-testid="stChatInput"] textarea,
+    [data-testid="stChatInput"] textarea[data-testid="stChatInputTextArea"] {{
+        background: transparent !important;
+        color: {T["text"]} !important;
+        -webkit-text-fill-color: {T["text"]} !important;
+        caret-color: {T["text"]} !important;
+        opacity: 1 !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        outline: none !important;
+        font-size: 15px !important;
+        line-height: 1.5 !important;
+    }}
+
+    [data-testid="stChatInput"] textarea::placeholder,
+    [data-testid="stChatInput"] textarea[data-testid="stChatInputTextArea"]::placeholder {{
+        color: {T["muted"]} !important;
+        -webkit-text-fill-color: {T["muted"]} !important;
+        opacity: 1 !important;
+    }}
+
+    [data-testid="stChatInput"] button,
+    [data-testid="stChatInput"] button svg {{
+        color: {T["accent"]} !important;
+        fill: {T["accent"]} !important;
     }}
 
     .footer {{
@@ -383,6 +420,175 @@ st.markdown(
         margin-top: 35px;
     }}
 
+    /* STREAMLIT TABS: PREVENT LABELS FROM BEING CLIPPED */
+    [data-testid="stTabs"] {{
+        overflow: visible !important;
+        margin-top: 10px !important;
+    }}
+
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {{
+        overflow: visible !important;
+        min-height: 56px !important;
+        align-items: center !important;
+        padding-top: 6px !important;
+        padding-bottom: 2px !important;
+    }}
+
+    [data-testid="stTabs"] [data-baseweb="tab"] {{
+        height: auto !important;
+        min-height: 44px !important;
+        line-height: 1.4 !important;
+        padding: 11px 14px !important;
+        white-space: nowrap !important;
+    }}
+
+    /* CHATGPT STYLE CHAT ASSISTANT */
+
+    .zi-chat-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 0 20px 0;
+        border-bottom: 1px solid {T["border"]};
+        margin-bottom: 24px;
+    }}
+
+    .zi-chat-brand {{
+        display: flex;
+        align-items: center;
+        gap: 11px;
+    }}
+
+    .zi-chat-logo {{
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 13px;
+        background: #173653;
+        color: #55C9F3;
+        font-size: 24px;
+        font-weight: 800;
+    }}
+
+    .zi-chat-title {{
+        color: {T["text"]};
+        font-size: 19px;
+        font-weight: 700;
+        line-height: 1.3;
+    }}
+
+    .zi-chat-subtitle {{
+        color: {T["muted"]};
+        font-size: 13px;
+        margin-top: 2px;
+    }}
+
+    .zi-online {{
+        background: #D8F8E5;
+        color: #16834A;
+        border-radius: 20px;
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 700;
+    }}
+
+    .zi-welcome {{
+        text-align: center;
+        padding: 22px 0 26px 0;
+    }}
+
+    .zi-welcome h2 {{
+        color: {T["text"]};
+        font-size: 27px;
+        font-weight: 700;
+        letter-spacing: -.5px;
+        margin: 0 0 10px 0;
+    }}
+
+    .zi-welcome p {{
+        color: {T["muted"]};
+        font-size: 15px;
+        margin: 0;
+    }}
+
+    .zi-suggestion {{
+        min-height: 106px;
+        background: {T["surface"]};
+        border: 1px solid {T["border"]};
+        border-radius: 15px;
+        padding: 15px;
+        margin-bottom: 10px;
+    }}
+
+    .zi-suggestion-icon {{
+        color: {T["accent"]};
+        font-size: 20px;
+        margin-bottom: 8px;
+    }}
+
+    .zi-suggestion-title {{
+        color: {T["text"]};
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 5px;
+    }}
+
+    .zi-suggestion-desc {{
+        color: {T["muted"]};
+        font-size: 13px;
+        line-height: 1.5;
+    }}
+
+    .zi-composer-label {{
+        color: {T["muted"]};
+        font-size: 13px;
+        padding: 2px 0 5px 0;
+    }}
+
+    .zi-composer-tools {{
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        color: {T["muted"]};
+        font-size: 13px;
+        padding-top: 4px;
+    }}
+
+    .zi-chat-note {{
+        color: {T["muted"]};
+        text-align: center;
+        font-size: 11px;
+        padding: 10px 0 0 0;
+    }}
+
+    .zi-message-user {{
+        background: {T["card"]};
+        border: 1px solid {T["border"]};
+        border-radius: 18px 18px 4px 18px;
+        padding: 13px 17px;
+        margin: 10px 0 14px auto;
+        max-width: 85%;
+        width: fit-content;
+        color: {T["text"]};
+    }}
+
+    .zi-message-assistant {{
+        color: {T["text"]};
+        padding: 10px 2px 20px 2px;
+        line-height: 1.75;
+        width: 100%;
+    }}
+
+    .zi-chat-actions {{
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        margin: 10px 0 18px 0;
+    }}
+
     @media(max-width:700px) {{
         .hero {{
             padding: 35px 15px;
@@ -390,6 +596,14 @@ st.markdown(
 
         .hero h1 {{
             font-size: 35px;
+        }}
+
+        .zi-welcome h2 {{
+            font-size: 23px;
+        }}
+
+        .zi-message-user {{
+            max-width: 95%;
         }}
     }}
     </style>
@@ -469,8 +683,493 @@ def image_to_data_url(uploaded_file):
 
 
 # ============================================================
+# 6. GEMINI IMAGE GENERATION
+# ============================================================
+
+def require_gemini_key():
+    if not GEMINI_API_KEY:
+        st.error(
+            "Gemini API key not found. Add GEMINI_API_KEY to your .env file "
+            "or Streamlit Cloud Secrets."
+        )
+        return False
+    return True
+
+
+def generate_ai_image(prompt, aspect_ratio="1:1", image_size="1K", reference_image=None):
+    """Generate a new image or edit a supplied reference image with Gemini."""
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is missing.")
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    request_input = prompt.strip()
+
+    if reference_image is not None:
+        reference_image.seek(0)
+        raw_image = reference_image.read()
+        mime = getattr(reference_image, "type", None) or "image/png"
+        request_input = [
+            {
+                "type": "image",
+                "data": base64.b64encode(raw_image).decode("utf-8"),
+                "mime_type": mime
+            },
+            {"type": "text", "text": prompt.strip()}
+        ]
+
+    interaction = client.interactions.create(
+        model=IMAGE_MODEL,
+        input=request_input,
+        response_format={
+            "type": "image",
+            "mime_type": "image/png",
+            "aspect_ratio": aspect_ratio,
+            "image_size": image_size
+        }
+    )
+
+    output_image = getattr(interaction, "output_image", None)
+    image_data = getattr(output_image, "data", None) if output_image else None
+
+    if not image_data:
+        # Compatibility fallback: inspect model-output steps.
+        for step in getattr(interaction, "steps", []) or []:
+            if getattr(step, "type", None) == "model_output":
+                for block in getattr(step, "content", []) or []:
+                    if getattr(block, "type", None) == "image":
+                        image_data = getattr(block, "data", None)
+                        if image_data:
+                            break
+            if image_data:
+                break
+
+    if not image_data:
+        message = getattr(interaction, "output_text", None)
+        raise RuntimeError(
+            "Gemini did not return an image. "
+            + (f"Model response: {message}" if message else "Try a clearer prompt.")
+        )
+
+    return base64.b64decode(image_data)
+
+
+def cloudflare_image_dimensions(aspect_ratio="1:1"):
+    """Return conservative FLUX.1 Schnell dimensions while preserving the ratio."""
+    dimensions = {
+        "1:1": (1024, 1024),
+        "16:9": (1024, 576),
+        "9:16": (576, 1024),
+        "4:3": (1024, 768),
+        "3:4": (768, 1024),
+        "3:2": (1024, 672),
+        "2:3": (672, 1024),
+        "5:4": (1024, 832),
+        "4:5": (832, 1024),
+        "21:9": (1024, 448),
+    }
+    return dimensions.get(aspect_ratio, (1024, 1024))
+
+
+def normalize_image_to_png(image_bytes):
+    """Decode provider output and re-encode it as a valid PNG for preview/download."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+            output = io.BytesIO()
+            image.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+    except Exception as exc:
+        raise RuntimeError(
+            "The image provider returned data that Pillow could not decode. "
+            "Try another provider or generate the image again."
+        ) from exc
+
+
+def generate_cloudflare_image(prompt, aspect_ratio="1:1"):
+    """Generate an image using Cloudflare Workers AI FLUX.1 Schnell."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise ValueError(
+            "Cloudflare credentials missing. Add CLOUDFLARE_ACCOUNT_ID and "
+            "CLOUDFLARE_API_TOKEN to your .env file."
+        )
+
+    endpoint = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    )
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    # FLUX.1 Schnell Workers AI schema accepts the prompt here;
+    # width/height are rejected by this endpoint, so ratio is described in the prompt.
+    payload = {"prompt": prompt.strip()}
+
+    try:
+        response = requests.post(
+            endpoint, headers=headers, json=payload, timeout=(15, 180)
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Cloudflare connection failed: {exc}") from exc
+
+    if not response.ok:
+        try:
+            details = response.json()
+        except ValueError:
+            details = response.text[:800]
+        raise RuntimeError(
+            f"Cloudflare returned HTTP {response.status_code}: {details}"
+        )
+
+    content_type = response.headers.get("Content-Type", "")
+    if content_type.startswith("image/"):
+        image_bytes = response.content
+    else:
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Cloudflare returned an unreadable response.") from exc
+
+        if not data.get("success", False):
+            raise RuntimeError(f"Cloudflare image generation failed: {data.get('errors', data)}")
+
+        encoded = (data.get("result") or {}).get("image")
+        if not encoded:
+            raise RuntimeError("Cloudflare response did not contain an image.")
+        try:
+            image_bytes = base64.b64decode(encoded)
+        except Exception as exc:
+            raise RuntimeError("Cloudflare returned invalid image data.") from exc
+
+    # Validate the returned bytes before showing them in Streamlit.
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as check:
+            check.verify()
+    except Exception as exc:
+        raise RuntimeError("Cloudflare response was not a valid image.") from exc
+
+    return image_bytes
+
+
+def generate_pollinations_image(prompt, aspect_ratio="1:1"):
+    """Generate an image through the Pollinations image API."""
+    if not POLLINATIONS_API_KEY:
+        raise ValueError(
+            "Pollinations API key missing. Add POLLINATIONS_API_KEY to your .env file."
+        )
+
+    width, height = cloudflare_image_dimensions(aspect_ratio)
+    endpoint = "https://gen.pollinations.ai/image/" + requests.utils.quote(
+        prompt.strip(), safe=""
+    )
+    headers = {
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}"
+    }
+    params = {
+        "model": POLLINATIONS_IMAGE_MODEL,
+        "width": width,
+        "height": height,
+    }
+
+    try:
+        response = requests.get(
+            endpoint,
+            headers=headers,
+            params=params,
+            timeout=(15, 180)
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Pollinations connection failed: {exc}") from exc
+
+    if not response.ok:
+        detail = response.text[:1000]
+        if response.status_code == 401:
+            detail = "Authentication failed. Check POLLINATIONS_API_KEY."
+        elif response.status_code == 402:
+            detail = (
+                "Pollinations reports insufficient available Pollen. "
+                "Check your Quest Pollen balance and key restrictions."
+            )
+        raise RuntimeError(
+            f"Pollinations returned HTTP {response.status_code}: {detail}"
+        )
+
+    content_type = response.headers.get("Content-Type", "")
+    if not content_type.startswith("image/"):
+        raise RuntimeError(
+            "Pollinations did not return an image. "
+            f"Content-Type: {content_type or 'unknown'}; "
+            f"Response: {response.text[:500]}"
+        )
+
+    image_bytes = response.content
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as check:
+            check.verify()
+    except Exception as exc:
+        raise RuntimeError("Pollinations returned invalid image data.") from exc
+
+    return image_bytes
+
+
+
+
+# ============================================================
+# LOCAL AI VIDEO GENERATION (NO API KEY)
+# ============================================================
+
+@st.cache_resource(show_spinner=False)
+def load_ltx_video_pipeline(mode="text"):
+    """Load the open-weight LTX-Video pipeline locally from Hugging Face."""
+    import torch
+    from diffusers import LTXPipeline, LTXImageToVideoPipeline
+
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    model_id = os.getenv("ZI_VIDEO_MODEL", "Lightricks/LTX-Video")
+    if mode == "image":
+        pipe = LTXImageToVideoPipeline.from_pretrained(
+            model_id, torch_dtype=dtype
+        )
+    else:
+        pipe = LTXPipeline.from_pretrained(model_id, torch_dtype=dtype)
+
+    if torch.cuda.is_available():
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to("cpu")
+    return pipe
+
+
+def generate_local_video(prompt, mode="text", source_image=None,
+                         width=512, height=512, frames=25,
+                         steps=20, guidance=3.0):
+    """Generate an MP4 locally using LTX-Video. No hosted inference/API."""
+    from diffusers.utils import export_to_video
+
+    pipe = load_ltx_video_pipeline(mode)
+    kwargs = {
+        "prompt": prompt,
+        "width": int(width),
+        "height": int(height),
+        "num_frames": int(frames),
+        "num_inference_steps": int(steps),
+        "guidance_scale": float(guidance),
+    }
+    if mode == "image":
+        if source_image is None:
+            raise ValueError("Upload a starting image for image-to-video.")
+        kwargs["image"] = ImageOps.exif_transpose(source_image).convert("RGB")
+
+    result = pipe(**kwargs)
+    video_frames = result.frames[0]
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp:
+        output_path = temp.name
+    export_to_video(video_frames, output_path, fps=8)
+    with open(output_path, "rb") as f:
+        video_bytes = f.read()
+    try:
+        os.remove(output_path)
+    except OSError:
+        pass
+    return video_bytes
+
+
+# ============================================================
 # 6. WEB SEARCH
 # ============================================================
+
+
+def render_puter_image_generator(prompt, aspect_ratio="1:1"):
+    """Render Puter.js image generation in a browser iframe.
+
+    Puter.js is browser-authenticated (user-pays); no Puter API key is stored
+    in the Streamlit server or .env file. Generated images can be previewed
+    and downloaded in this iframe. They are not transferred into Python's
+    st.session_state.
+    """
+    safe_prompt = json.dumps(prompt)
+    safe_ratio = json.dumps(aspect_ratio)
+
+    component_html = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://js.puter.com/v2/"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:14px;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1220;color:#e5e7eb}
+.panel{border:1px solid #263449;border-radius:14px;padding:16px;background:#111c2e;margin-bottom:12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}label{display:block;font-size:13px;color:#aebbd0;margin-bottom:6px}
+textarea,select{width:100%;border:1px solid #35465f;border-radius:9px;background:#0b1424;color:#f8fafc;padding:10px;font:inherit}
+textarea{min-height:90px;resize:vertical}.field{flex:1;min-width:220px}
+button,.download{border:0;border-radius:9px;padding:10px 14px;background:#635bff;color:white;font-weight:650;cursor:pointer;text-decoration:none;display:inline-block}
+button:disabled{opacity:.5;cursor:not-allowed}.secondary{background:#263449}.muted{color:#9aa9bf;font-size:12px}
+#status{font-size:13px;color:#aebbd0;margin-top:10px;white-space:pre-wrap}.ok{color:#86efac!important}.bad{color:#fca5a5!important}
+#preview{display:none;width:100%;max-height:650px;object-fit:contain;background:#080d16;border-radius:10px;margin-top:12px}
+#download{display:none;margin-top:10px}.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.stat{background:#0b1424;border-radius:9px;padding:9px;font-size:12px}.stat b{display:block;color:#fff;margin-top:4px;overflow-wrap:anywhere}
+@media(max-width:600px){.stats{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="row" style="justify-content:space-between">
+    <strong>✦ Puter.js Image Studio</strong><span id="authState" class="muted">Checking sign-in…</span>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <button id="signOut" class="secondary" type="button" style="display:none">Disconnect Puter account</button>
+  </div>
+</div>
+<div class="panel">
+  <label for="prompt">Image prompt</label>
+  <textarea id="prompt"></textarea>
+  <div class="row" style="margin-top:12px">
+    <div class="field">
+      <label for="model">Image model</label>
+      <select id="model">
+        <option value="default">GPT Image 2 — Low quality</option>
+        <option value="gemini-3.1-flash-image">Gemini 3.1 Flash Image</option>
+        <option value="grok-imagine-image">Grok Imagine Image</option>
+        <option value="@cf/black-forest-labs/flux-1-schnell">FLUX.1 Schnell (Cloudflare)</option>
+      </select>
+    </div>
+    <div style="align-self:end"><button id="generate" type="button">Generate image</button></div>
+  </div>
+  <p class="muted">No Puter API key is required. On first use, Puter.js may ask the visitor to authorize their own account. Later use normally reuses that browser session. Model availability, allowance and charges are controlled by Puter.</p>
+  <div id="status" role="status">Ready.</div>
+</div>
+<div class="panel">
+  <div class="row" style="justify-content:space-between"><strong>Generated image</strong><a id="download" class="download" download="zi_nova_puter_image.png">Download PNG</a></div>
+  <img id="preview" alt="Generated image preview">
+</div>
+<div class="panel">
+  <strong>Account usage verification</strong>
+  <div class="stats" style="margin-top:10px">
+    <div class="stat">Monthly allowance<b id="allowance">—</b></div>
+    <div class="stat">Remaining<b id="remaining">—</b></div>
+    <div class="stat">Last image cost<b id="cost">—</b></div>
+  </div>
+  <p class="muted">A displayed $0.0000 per image is not proof of unlimited free use. Check the allowance and account usage regularly.</p>
+  <button id="refresh" class="secondary" type="button">Refresh usage</button>
+</div>
+<script>
+const INITIAL_PROMPT = __PROMPT__;
+const RATIO = __RATIO__;
+const el = id => document.getElementById(id);
+const fmt = value => '$' + Number(value || 0).toFixed(4);
+let beforeUsage = null;
+function setStatus(message, cls=''){el('status').textContent=message;el('status').className=cls;}
+async function signedInUser(){
+  try { if (!puter.auth.isSignedIn()) return null; return await puter.auth.getUser(); }
+  catch(e){ return null; }
+}
+async function readUsage(){
+  try{
+    if(!puter.auth.isSignedIn()) return null;
+    const usage=await puter.auth.getMonthlyUsage();
+    return usage && usage.allowanceInfo ? usage.allowanceInfo : null;
+  }catch(e){return null;}
+}
+async function refreshAuth(){
+  const user=await signedInUser();
+  el('authState').textContent=user ? ('Connected: '+user.username) : 'Connects automatically on first use';
+  el('signOut').style.display=user?'inline-block':'none';
+  el('generate').disabled=false;
+  await refreshUsage();
+}
+async function refreshUsage(){
+  const info=await readUsage();
+  if(!info){el('allowance').textContent='Unavailable';el('remaining').textContent='Unavailable';return;}
+  el('allowance').textContent=fmt(info.monthUsageAllowance);
+  el('remaining').textContent=fmt(info.remaining);
+}
+el('signOut').addEventListener('click',async()=>{try{await puter.auth.signOut();await refreshAuth();}catch(e){setStatus('Disconnect failed: '+e.message,'bad');}});
+el('refresh').addEventListener('click',refreshUsage);
+el('prompt').value=INITIAL_PROMPT;
+el('generate').addEventListener('click',async()=>{
+  const prompt=el('prompt').value.trim();
+  if(!prompt){setStatus('Enter an image prompt.','bad');return;}
+  // Puter.js automatically starts its own authorization flow on the first
+  // cloud/AI request. Because this runs inside a click handler, popup auth
+  // is allowed by the browser. Existing sessions are reused automatically.
+  const model=el('model').value;
+  const options=model==='default'?{quality:'low'}:{model:model};
+  if(model==='gemini-3.1-flash-image') options.quality='512';
+  // Ratio is added to the natural-language prompt because txt2img options
+  // in the supplied working test project do not expose a ratio parameter.
+  const finalPrompt=prompt+' Compose the image in a '+RATIO+' aspect ratio.';
+  const button=el('generate');button.disabled=true;
+  el('preview').style.display='none';el('download').style.display='none';
+  el('cost').textContent='Checking…';
+  beforeUsage=await readUsage();
+  const started=performance.now();setStatus('Generating with '+(model==='default'?'GPT Image 2 (low)':model)+'…');
+  try{
+    const image=await puter.ai.txt2img(finalPrompt,{...options,test_mode:false});
+    if(!image) throw new Error('Puter returned no image.');
+
+    // Puter may return an image element backed by a temporary blob URL.
+    // Convert it to a self-contained data URL before preview/download so the
+    // image does not depend on a short-lived iframe-local object URL.
+    async function imageToDataUrl(result){
+      let source = typeof result === 'string' ? result : (result.src || result.url || '');
+      if (result instanceof HTMLImageElement && result.complete && result.naturalWidth > 0) {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = result.naturalWidth;
+          canvas.height = result.naturalHeight;
+          canvas.getContext('2d').drawImage(result, 0, 0);
+          return canvas.toDataURL('image/png');
+        } catch (canvasError) {
+          // Cross-origin images may block canvas export; try fetching the source below.
+        }
+      }
+      if (!source) throw new Error('Puter returned an image without a usable source.');
+      if (source.startsWith('data:image/')) return source;
+
+      const response = await fetch(source);
+      if (!response.ok) throw new Error('Could not retrieve the generated image (HTTP '+response.status+').');
+      const blob = await response.blob();
+      if (!blob.type.startsWith('image/')) throw new Error('Puter returned a non-image file.');
+      return await new Promise((resolve,reject)=>{
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('Could not decode the generated image.'));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    await refreshAuth();
+    const dataUrl = await imageToDataUrl(image);
+    const preview=el('preview');
+    await new Promise((resolve,reject)=>{
+      preview.onload=resolve;
+      preview.onerror=()=>reject(new Error('Image data was returned but the browser could not render the preview.'));
+      preview.src=dataUrl;
+    });
+    preview.style.display='block';
+    el('download').href=dataUrl;
+    el('download').style.display='inline-block';
+    const after=await readUsage();
+    if(beforeUsage&&after){const spent=Number(beforeUsage.remaining||0)-Number(after.remaining||0);el('cost').textContent=spent>0?fmt(spent):'< display precision';}
+    else el('cost').textContent='Unavailable';
+    setStatus('Image generated successfully in '+((performance.now()-started)/1000).toFixed(1)+' seconds. Dimensions: '+preview.naturalWidth+' × '+preview.naturalHeight+'.','ok');
+    await refreshUsage();
+  }catch(e){setStatus('Generation failed: '+(e.message||String(e)),'bad');el('cost').textContent='Not available';await refreshUsage();}
+  finally{button.disabled=false;}
+});
+if(typeof window.puter==='undefined'){
+  setStatus('Puter.js did not load. Check internet access or browser blocking.','bad');
+  el('generate').disabled=true;
+}else{refreshAuth();}
+</script>
+</body>
+</html>"""
+    component_html = component_html.replace("__PROMPT__", safe_prompt).replace("__RATIO__", safe_ratio)
+    components.html(component_html, height=900, scrolling=True)
+
 
 def search_web(query):
     try:
@@ -703,7 +1402,95 @@ Rules:
 
 
 # ============================================================
-# 11. SIDEBAR
+# 11. CHAT ASSISTANT HELPERS
+# ============================================================
+
+def start_new_chat():
+    st.session_state.messages = []
+    st.session_state.last_sources = []
+    st.session_state.chat_image = None
+    st.session_state.chat_input_counter += 1
+
+
+def run_chat_prompt(prompt, image_file=None):
+    if not prompt.strip() and image_file is None:
+        return
+
+    if image_file is not None:
+        try:
+            image_url = image_to_data_url(image_file)
+
+            image_prompt = prompt.strip() or (
+                "Describe and analyze this image in detail."
+            )
+
+            answer = generate_vision_response(
+                image_url,
+                image_prompt
+            )
+
+            user_content = image_prompt + "\n[Image attached]"
+
+            st.session_state.messages.append({
+                "role": "user",
+                "content": user_content
+            })
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer
+            })
+
+            st.session_state.last_sources = []
+
+        except Exception as error:
+            st.error(f"Image analysis failed: {error}")
+
+        return
+
+    sources = []
+    final_prompt = prompt
+
+    if st.session_state.web_on:
+        sources = search_web(prompt)
+
+        if sources:
+            research = "\n\n".join(
+                f"Title: {item['title']}\n"
+                f"URL: {item['url']}\n"
+                f"Summary: {item['snippet']}"
+                for item in sources
+            )
+
+            final_prompt = (
+                prompt
+                + "\n\nUse the following web research when relevant. "
+                "Distinguish sourced facts from uncertainty:\n"
+                + research
+            )
+
+    history = st.session_state.messages[-12:]
+
+    answer = generate_text(
+        final_prompt,
+        history
+    )
+
+    st.session_state.messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": answer
+    })
+
+    st.session_state.last_sources = sources
+
+
+# ============================================================
+# 12. SIDEBAR
 # ============================================================
 
 with st.sidebar:
@@ -754,16 +1541,11 @@ with st.sidebar:
 
     st.divider()
 
-    if GROQ_API_KEY:
-        st.success("Groq API key detected")
-    else:
-        st.warning("Groq API key not configured")
-
     st.caption("Zi Nova AI · An Intelligence Platform")
 
 
 # ============================================================
-# 12. HOME PAGE
+# 13. HOME PAGE
 # ============================================================
 
 if st.session_state.page == "Home":
@@ -878,7 +1660,7 @@ if st.session_state.page == "Home":
 
 
 # ============================================================
-# 13. CAPTION STUDIO
+# 14. CAPTION STUDIO
 # ============================================================
 
 elif st.session_state.page == "Caption Studio":
@@ -979,146 +1761,285 @@ elif st.session_state.page == "Caption Studio":
 
 
 # ============================================================
-# 14. ZI AI ASSISTANT
+# 15. ZI AI ASSISTANT
 # ============================================================
 
 elif st.session_state.page == "Zi AI Assistant":
 
-    st.title("◈ Zi AI Assistant")
-    st.caption("Choose how you want to interact with Zi.")
-
     if not require_api_key():
         st.stop()
 
-    chat_tab, voice_tab = st.tabs([
+    chat_tab, voice_tab, image_tab, animator_tab = st.tabs([
         "◈ Chat Assistant",
-        "🎙️ AI Voice Assistant"
+        "🎙️ AI Voice Assistant",
+        "🎨 AI Image Generation",
+        "🎬 Zi AI Animator"
     ])
 
     # --------------------------------------------------------
-    # 14A. CHAT ASSISTANT
+    # 16A. CHAT ASSISTANT — CHATGPT STYLE
     # --------------------------------------------------------
 
     with chat_tab:
 
-        st.subheader("Chat Assistant")
+        # HEADER
 
-        st.caption(
-            "Text conversations, web research and image intelligence."
-        )
+        render_html("""
+        <div class="zi-chat-header">
+            <div class="zi-chat-brand">
+                <div class="zi-chat-logo">✦</div>
+                <div>
+                    <div class="zi-chat-title">Zi AI</div>
+                    <div class="zi-chat-subtitle">Intelligent Assistant</div>
+                </div>
+            </div>
+            <div class="zi-online">Online</div>
+        </div>
+        """)
 
-        st.toggle(
-            "Enable web search",
-            key="web_on"
-        )
+        # NEW CHAT CONTROL
 
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        action_col1, action_col2 = st.columns([5, 1])
 
-        question = st.chat_input(
-            "Message Zi...",
-            key="zi_chat_input"
-        )
+        with action_col2:
+            if st.button(
+                "＋ New Chat",
+                key="zi_new_chat",
+                use_container_width=True
+            ):
+                start_new_chat()
+                st.rerun()
 
-        if question:
+        # WELCOME SCREEN
 
-            st.session_state.messages.append({
-                "role": "user",
-                "content": question
-            })
+        if not st.session_state.messages:
 
-            try:
-                with st.spinner("Zi is thinking..."):
+            render_html("""
+            <div class="zi-welcome">
+                <h2>How can I help you today?</h2>
+                <p>
+                    Ask anything. Research, create, analyze and solve problems with Zi.
+                </p>
+            </div>
+            """)
 
-                    sources = []
+            # SUGGESTION CARDS
 
-                    if st.session_state.web_on:
-                        sources = search_web(question)
+            card1, card2 = st.columns(2, gap="small")
 
-                    search_context = ""
+            with card1:
 
-                    if sources:
-                        search_context = (
-                            "\n\nWeb research results:\n"
-                            + "\n".join(
-                                f"{s['title']}: {s['url']} "
-                                f"{s['snippet']}"
-                                for s in sources
-                            )
+                render_html("""
+                <div class="zi-suggestion">
+                    <div class="zi-suggestion-icon">♧</div>
+                    <div class="zi-suggestion-title">Explain something</div>
+                    <div class="zi-suggestion-desc">
+                        Understand complex topics simply.
+                    </div>
+                </div>
+                """)
+
+                if st.button(
+                    "Explain something",
+                    key="zi_suggest_explain",
+                    use_container_width=True
+                ):
+                    st.session_state.zi_pending_prompt = (
+                        "Explain a complex topic to me in simple language."
+                    )
+                    st.rerun()
+
+            with card2:
+
+                render_html("""
+                <div class="zi-suggestion">
+                    <div class="zi-suggestion-icon">&lt;/&gt;</div>
+                    <div class="zi-suggestion-title">Write code</div>
+                    <div class="zi-suggestion-desc">
+                        Build and debug applications.
+                    </div>
+                </div>
+                """)
+
+                if st.button(
+                    "Write code",
+                    key="zi_suggest_code",
+                    use_container_width=True
+                ):
+                    st.session_state.zi_pending_prompt = (
+                        "Help me write and explain code."
+                    )
+                    st.rerun()
+
+            card3, card4 = st.columns(2, gap="small")
+
+            with card3:
+
+                render_html("""
+                <div class="zi-suggestion">
+                    <div class="zi-suggestion-icon">⌕</div>
+                    <div class="zi-suggestion-title">Research</div>
+                    <div class="zi-suggestion-desc">
+                        Explore topics with web search.
+                    </div>
+                </div>
+                """)
+
+                if st.button(
+                    "Research",
+                    key="zi_suggest_research",
+                    use_container_width=True
+                ):
+                    st.session_state.zi_pending_prompt = (
+                        "Research an interesting topic and explain the findings."
+                    )
+                    st.rerun()
+
+            with card4:
+
+                render_html("""
+                <div class="zi-suggestion">
+                    <div class="zi-suggestion-icon">▧</div>
+                    <div class="zi-suggestion-title">Analyze images</div>
+                    <div class="zi-suggestion-desc">
+                        Upload images for AI analysis.
+                    </div>
+                </div>
+                """)
+
+                if st.button(
+                    "Analyze images",
+                    key="zi_suggest_images",
+                    use_container_width=True
+                ):
+                    st.session_state.zi_pending_prompt = (
+                        "I want to upload an image for analysis."
+                    )
+                    st.rerun()
+
+        # CONVERSATION HISTORY
+
+        else:
+
+            for message in st.session_state.messages:
+
+                if message["role"] == "user":
+
+                    with st.chat_message("user"):
+                        st.markdown(message["content"])
+
+                else:
+
+                    with st.chat_message("assistant"):
+                        st.markdown(
+                            message["content"],
+                            unsafe_allow_html=False
                         )
 
-                    answer = generate_text(
-                        question + search_context,
-                        st.session_state.messages[:-1]
+            if st.session_state.last_sources:
+                render_sources(st.session_state.last_sources)
+
+        # WEB SEARCH CONTROL
+
+        web_col1, web_col2 = st.columns([4, 1])
+
+        with web_col1:
+            st.toggle(
+                "Web search",
+                key="web_on",
+                help="Search the web for relevant information."
+            )
+
+        with web_col2:
+
+            if st.button(
+                "Clear chat",
+                key="zi_clear_chat",
+                use_container_width=True
+            ):
+                start_new_chat()
+                st.rerun()
+
+        # IMAGE ATTACHMENT
+
+        with st.expander(
+            "📎 Attach image",
+            expanded=bool(st.session_state.chat_image)
+        ):
+
+            uploaded_chat_image = st.file_uploader(
+                "Upload an image for analysis",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="zi_chat_image_upload"
+            )
+
+            if uploaded_chat_image:
+                st.session_state.chat_image = uploaded_chat_image
+
+                st.image(
+                    uploaded_chat_image,
+                    caption="Attached image",
+                    width=240
+                )
+
+                if st.button(
+                    "Remove image",
+                    key="zi_remove_chat_image"
+                ):
+                    st.session_state.chat_image = None
+                    st.rerun()
+
+        # CHAT INPUT
+
+        pending_prompt = st.session_state.pop(
+            "zi_pending_prompt",
+            None
+        )
+
+        prompt = st.chat_input(
+            "Message Zi...",
+            key=f"zi_chat_input_{st.session_state.chat_input_counter}"
+        )
+
+        if pending_prompt:
+            prompt = pending_prompt
+
+        if prompt:
+
+            if not require_api_key():
+                st.stop()
+
+            try:
+
+                with st.spinner("Zi is thinking..."):
+
+                    image_to_analyze = st.session_state.chat_image
+
+                    run_chat_prompt(
+                        prompt,
+                        image_to_analyze
                     )
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer
-                })
+                    st.session_state.chat_image = None
 
-                st.session_state.last_sources = sources
                 st.rerun()
 
             except Exception as error:
-                st.error(f"Chat Assistant error: {error}")
+                st.error(f"Zi AI error: {error}")
 
-        if st.session_state.last_sources:
-            render_sources(st.session_state.last_sources)
+        render_html("""
+        <div class="zi-chat-note">
+            Zi can make mistakes. Verify important information.
+        </div>
+        """)
 
-        st.divider()
-
-        st.subheader("Image Intelligence")
-
-        chat_image = st.file_uploader(
-            "Upload an image",
-            type=["jpg", "jpeg", "png", "webp"],
-            key="chat_image_upload"
+        st.markdown(
+            " ",
+            unsafe_allow_html=False
         )
-
-        image_question = st.text_input(
-            "What should Zi look for?",
-            value="Describe this image in detail.",
-            key="chat_image_question"
-        )
-
-        if st.button(
-            "Analyze Image",
-            key="chat_analyze_button",
-            use_container_width=True
-        ):
-
-            if chat_image is None:
-                st.warning("Upload an image first.")
-            else:
-                try:
-                    with st.spinner("Analyzing image..."):
-                        image_url = image_to_data_url(chat_image)
-                        image_answer = generate_vision_response(
-                            image_url,
-                            image_question
-                        )
-
-                    st.markdown("### Image Analysis")
-                    st.write(image_answer)
-
-                except Exception as error:
-                    st.error(f"Image analysis failed: {error}")
-
-        st.divider()
-
-        if st.button(
-            "Clear Chat History",
-            key="clear_chat_button",
-            use_container_width=True
-        ):
-            st.session_state.messages = []
-            st.session_state.last_sources = []
-            st.rerun()
 
     # --------------------------------------------------------
-    # 14B. AI VOICE ASSISTANT
+    # 16B. AI VOICE ASSISTANT
     # --------------------------------------------------------
 
     with voice_tab:
@@ -1168,8 +2089,6 @@ elif st.session_state.page == "Zi AI Assistant":
         ):
 
             try:
-                # STEP 1: TRANSCRIPTION
-
                 with st.spinner("Step 1/3: Understanding your voice..."):
                     spoken_question = transcribe_audio(audio_input)
 
@@ -1179,8 +2098,6 @@ elif st.session_state.page == "Zi AI Assistant":
                 else:
                     st.markdown("### Your Spoken Command")
                     st.info(spoken_question)
-
-                    # STEP 2: AI RESPONSE
 
                     with st.spinner("Step 2/3: Zi is thinking..."):
                         voice_answer = generate_text(
@@ -1201,8 +2118,6 @@ elif st.session_state.page == "Zi AI Assistant":
                             "content": voice_answer
                         }
                     ])
-
-                    # STEP 3: SPEECH GENERATION
 
                     with st.spinner("Step 3/3: Generating voice..."):
                         audio_bytes = generate_speech(
@@ -1260,8 +2175,286 @@ elif st.session_state.page == "Zi AI Assistant":
             """)
 
 
+    # --------------------------------------------------------
+    # 15C. AI IMAGE GENERATION
+    # --------------------------------------------------------
+
+    with image_tab:
+
+        st.title("🎨 AI Image Generator")
+        st.caption(
+            "Free-first setup: Cloudflare Workers AI is selected by default when configured. "
+            "Puter.js is an optional user-account route; Pollinations and Gemini remain available "
+            "only when configured and may consume account credits or incur charges."
+        )
+
+        available_providers = []
+        if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+            available_providers.append("Free — Cloudflare FLUX.1 Schnell")
+        available_providers.append("Puter.js — Multi-model")
+        if POLLINATIONS_API_KEY:
+            available_providers.append("Pollinations — FLUX")
+        if GEMINI_API_KEY:
+            available_providers.append("Premium — Google Gemini")
+
+        st.warning(
+            "Public free access is not unlimited: Cloudflare Workers AI currently has a shared "
+            "10,000-Neuron daily free allocation per Cloudflare account. All visitors to this "
+            "deployment consume that same pool. When it is exhausted, generation stops until reset."
+        )
+
+        st.markdown("### Choose generation provider")
+        selected_provider = st.selectbox(
+            "Image generation mode",
+            available_providers,
+            key="zi_image_provider_free_first"
+        )
+
+        st.markdown("### Describe the image you want")
+        image_prompt = st.text_area(
+            "Image prompt",
+            placeholder=(
+                "Example: A cinematic photorealistic futuristic Mumbai skyline at sunset, "
+                "dramatic golden light, detailed architecture, premium editorial photography."
+            ),
+            height=130,
+            key="zi_image_prompt"
+        )
+
+        gen_col1, gen_col2, gen_col3 = st.columns(3)
+
+        with gen_col1:
+            image_style = st.selectbox(
+                "Style",
+                [
+                    "Photorealistic", "Cinematic", "Editorial photography",
+                    "Fashion photography", "Product photography",
+                    "Architecture / interior design", "Digital art",
+                    "Fantasy concept art", "Anime / manga", "3D render",
+                    "Illustration", "Watercolor / painting", "Minimalist",
+                    "Vector / flat design", "Logo / brand identity",
+                    "Poster / advertisement", "Game asset / character design",
+                    "Infographic / diagram", "Custom"
+                ],
+                key="zi_image_style"
+            )
+
+        with gen_col2:
+            aspect_ratio = st.selectbox(
+                "Aspect ratio",
+                ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9"],
+                key="zi_image_ratio"
+            )
+
+        with gen_col3:
+            if selected_provider == "Premium — Google Gemini":
+                image_size = st.selectbox(
+                    "Image resolution", ["1K", "2K", "4K"], index=0,
+                    key="zi_image_size"
+                )
+            else:
+                image_size = "1K"
+                st.selectbox(
+                    "Image resolution", ["1K / provider default"],
+                    key="zi_image_size_cloudflare"
+                )
+
+        reference_image = st.file_uploader(
+            "Optional: upload a reference image to edit (Gemini Premium only)",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="zi_image_reference",
+            help="Reference-image editing is available only with the configured Gemini provider."
+        )
+
+        if reference_image:
+            st.image(reference_image, caption="Reference image", width=260)
+            if selected_provider != "Premium — Google Gemini":
+                st.info(
+                    "Reference-image editing is supported only by the configured Gemini provider. "
+                    "The reference image will not be sent to Puter, Cloudflare or Pollinations."
+                )
+
+        style_instruction = (
+            "" if image_style == "Custom" else f" Visual style: {image_style}."
+        )
+        final_image_prompt = (
+            image_prompt.strip()
+            + style_instruction
+            + f" Compose the image for an aspect ratio of {aspect_ratio}."
+            + " Create a polished, professional, high-quality result with strong composition, "
+              "coherent details, appropriate lighting and clean visual hierarchy. Follow "
+              "the requested subject and use case closely. Avoid unwanted text, watermarks "
+              "and logos unless the prompt explicitly requests them."
+        )
+
+        if selected_provider == "Puter.js — Multi-model":
+            st.info(
+                "Puter.js runs inside this panel. First-time visitors may be asked to authorize "
+                "their own Puter account on the first generation; returning visitors normally "
+                "reuse their browser session. No Puter API key is stored by Zi Nova AI. "
+                "Images can be previewed and downloaded here, but are not copied into Streamlit's Python session."
+            )
+            if not image_prompt.strip():
+                st.caption("Enter a prompt above, then generate from the Puter.js panel below.")
+            render_puter_image_generator(final_image_prompt, aspect_ratio=aspect_ratio)
+
+        else:
+            can_generate = bool(image_prompt.strip())
+            if st.button(
+                "✨ Generate AI Image",
+                type="primary",
+                use_container_width=True,
+                disabled=not can_generate
+            ):
+                try:
+                    if selected_provider == "Free — Cloudflare FLUX.1 Schnell":
+                        if reference_image is not None:
+                            st.warning(
+                                "Reference-image editing is not supported by Cloudflare FLUX. "
+                                "The reference image was not sent."
+                            )
+                        with st.spinner("Cloudflare FLUX.1 Schnell is creating your image..."):
+                            image_bytes = generate_cloudflare_image(
+                                final_image_prompt, aspect_ratio=aspect_ratio
+                            )
+                        provider_label = "Cloudflare FLUX.1 Schnell"
+                        resolution_label = "1K"
+
+                    elif selected_provider == "Pollinations — FLUX":
+                        if reference_image is not None:
+                            st.warning(
+                                "Reference-image editing is not supported by this Pollinations "
+                                "integration. The reference image was not sent."
+                            )
+                        with st.spinner("Pollinations FLUX is creating your image..."):
+                            image_bytes = generate_pollinations_image(
+                                final_image_prompt, aspect_ratio=aspect_ratio
+                            )
+                        provider_label = f"Pollinations ({POLLINATIONS_IMAGE_MODEL})"
+                        resolution_label = f"{image_size} · {aspect_ratio}"
+
+                    else:
+                        with st.spinner("Gemini is creating your image..."):
+                            image_bytes = generate_ai_image(
+                                final_image_prompt,
+                                aspect_ratio=aspect_ratio,
+                                image_size=image_size,
+                                reference_image=reference_image
+                            )
+                        provider_label = IMAGE_MODEL
+                        resolution_label = image_size
+
+                    # Normalize provider output to PNG so Streamlit preview and
+                    # the .png download always receive matching, valid image data.
+                    image_bytes = normalize_image_to_png(image_bytes)
+
+                    st.session_state.generated_image = {
+                        "bytes": image_bytes,
+                        "prompt": final_image_prompt,
+                        "ratio": aspect_ratio,
+                        "size": resolution_label,
+                        "provider": provider_label
+                    }
+                    st.success("Image generated successfully.")
+
+                except Exception as error:
+                    st.error(f"Image generation failed: {error}")
+
+            if st.session_state.generated_image:
+                result = st.session_state.generated_image
+                st.divider()
+                st.subheader("Your generated image")
+                st.image(result["bytes"], use_container_width=True)
+                st.caption(
+                    f"Provider: {result.get('provider', IMAGE_MODEL)} · "
+                    f"Aspect ratio: {result['ratio']} · Resolution: {result['size']}"
+                )
+                st.download_button(
+                    "⬇️ Download PNG",
+                    data=result["bytes"],
+                    file_name="zi_nova_ai_generated.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
+                with st.expander("View generation prompt"):
+                    st.write(result["prompt"])
+
+
+    # --------------------------------------------------------
+    # 16D. ZI AI ANIMATOR — LOCAL TEXT-TO-VIDEO + IMAGE-TO-VIDEO
+    # --------------------------------------------------------
+
+    with animator_tab:
+        st.title("🎬 Zi AI Animator")
+        st.caption("Open-weight LTX-Video running locally on your computer. No video API key or paid generation service.")
+        st.info("First run downloads the model weights from Hugging Face. After download, generation runs locally. Model download and inference require substantial disk space and compute resources.")
+
+        mode = st.radio(
+            "Generation mode",
+            ["Text-to-Video", "Image-to-Video"],
+            horizontal=True,
+            key="zi_animator_mode"
+        )
+        video_prompt = st.text_area(
+            "Describe the video",
+            placeholder="A cinematic shot of a futuristic city at sunset, camera slowly pushing forward...",
+            height=120,
+            key="zi_animator_prompt"
+        )
+        start_image = None
+        if mode == "Image-to-Video":
+            start_image = st.file_uploader(
+                "Upload starting image",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="zi_animator_start_image"
+            )
+            if start_image:
+                st.image(start_image, caption="Starting frame", use_container_width=True)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            video_size = st.selectbox("Resolution", ["512 × 512", "768 × 512", "512 × 768"], key="zi_animator_resolution")
+        with c2:
+            video_frames = st.selectbox("Frames", [17, 25, 33, 49], index=1, key="zi_animator_frames")
+        with c3:
+            video_steps = st.selectbox("Quality steps", [10, 15, 20, 25], index=2, key="zi_animator_steps")
+
+        width, height = [int(v.strip()) for v in video_size.split("×")]
+        can_generate_video = bool(video_prompt.strip()) and (mode == "Text-to-Video" or start_image is not None)
+        if st.button("🚀 Generate Video", type="primary", use_container_width=True, disabled=not can_generate_video, key="zi_animator_generate"):
+            try:
+                with st.spinner("Loading local LTX-Video model and generating. First run may take time..."):
+                    video_data = generate_local_video(
+                        video_prompt,
+                        mode="image" if mode == "Image-to-Video" else "text",
+                        source_image=start_image,
+                        width=width,
+                        height=height,
+                        frames=video_frames,
+                        steps=video_steps,
+                    )
+                st.session_state.zi_animator_video = video_data
+                st.success("Video generated.")
+            except Exception as error:
+                st.error(f"Local video generation failed: {error}")
+                st.caption("Check the error details. The model requires compatible Diffusers/PyTorch versions and sufficient system resources.")
+
+        if st.session_state.get("zi_animator_video"):
+            st.divider()
+            st.subheader("Generated video")
+            st.video(st.session_state.zi_animator_video)
+            st.download_button(
+                "⬇️ Download MP4",
+                data=st.session_state.zi_animator_video,
+                file_name="zi_nova_ai_video.mp4",
+                mime="video/mp4",
+                use_container_width=True,
+                key="zi_animator_download"
+            )
+
+
 # ============================================================
-# 15. AI IMAGE SIZE REDUCER
+# 16. AI IMAGE SIZE REDUCER
 # ============================================================
 
 elif st.session_state.page == "AI Image Size Reducer":
@@ -1438,7 +2631,7 @@ elif st.session_state.page == "AI Image Size Reducer":
 
 
 # ============================================================
-# 16. ZI ACTIVATOR PRO
+# 17. ZI ACTIVATOR PRO
 # ============================================================
 
 elif st.session_state.page == "Zi Activator Pro":
@@ -1461,10 +2654,6 @@ elif st.session_state.page == "Zi Activator Pro":
         "🪟 Windows Activation",
         "▦ Microsoft Office Activation"
     ])
-
-    # --------------------------------------------------------
-    # WINDOWS ACTIVATION
-    # --------------------------------------------------------
 
     with windows_tab:
 
@@ -1533,10 +2722,6 @@ elif st.session_state.page == "Zi Activator Pro":
 
                 st.write("**Selected product:**", windows_product)
                 st.write("**License preference:**", windows_license_type)
-
-    # --------------------------------------------------------
-    # MICROSOFT OFFICE ACTIVATION
-    # --------------------------------------------------------
 
     with office_tab:
 
@@ -1608,10 +2793,6 @@ elif st.session_state.page == "Zi Activator Pro":
                 st.write("**Selected product:**", office_product)
                 st.write("**Intended use:**", office_usage)
 
-    # --------------------------------------------------------
-    # SERVICE INFORMATION
-    # --------------------------------------------------------
-
     st.divider()
 
     st.subheader("Zi Activator Pro — Service Standards")
@@ -1656,7 +2837,7 @@ elif st.session_state.page == "Zi Activator Pro":
 
 
 # ============================================================
-# 17. ABOUT PROJECT
+# 18. ABOUT PROJECT
 # ============================================================
 
 elif st.session_state.page == "About Project":
@@ -1681,6 +2862,7 @@ elif st.session_state.page == "About Project":
     st.markdown("### Available Modules")
 
     st.write("- Smart Caption Studio")
+    st.write("- AI Image Generation (inside Zi AI Assistant)")
     st.write("- Chat Assistant")
     st.write("- AI Voice Assistant")
     st.write("- Image Intelligence")
@@ -1692,7 +2874,8 @@ elif st.session_state.page == "About Project":
 
     st.write(f"**Text AI:** {TEXT_MODEL}")
     st.write(f"**Vision AI:** {VISION_MODEL}")
-    st.write("**AI Provider:** Groq")
+    st.write("**AI Provider:** Groq + Google Gemini")
+    st.write("**Image Generation:** Cloudflare FLUX.1 Schnell + Pollinations FLUX + optional Gemini")
     st.write("**Speech Recognition:** Groq Whisper")
     st.write("**Voice Generation:** Google Text-to-Speech")
     st.write("**Web Search:** DuckDuckGo")
@@ -1702,7 +2885,7 @@ elif st.session_state.page == "About Project":
 
 
 # ============================================================
-# 18. FOOTER
+# 19. FOOTER
 # ============================================================
 
 render_html("""
