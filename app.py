@@ -924,17 +924,28 @@ def generate_pollinations_image(prompt, aspect_ratio="1:1"):
 
 @st.cache_resource(show_spinner=False)
 def load_ltx_video_pipeline(mode="text"):
-    """Load LTX-Video and retry once if the Hugging Face cache is corrupt.
+    """Load and cache LTX-Video once per generation mode.
 
-    The retry deliberately targets this model's cache only. It does not delete
-    the entire Hugging Face cache and does not re-download on every rerun.
+    Fast inference requires a CUDA GPU. CPU-only Streamlit instances are
+    rejected early rather than appearing to hang for hours.
     """
-    import shutil
     import torch
     from huggingface_hub import snapshot_download
     from diffusers import LTXPipeline, LTXImageToVideoPipeline
 
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "This runtime has no CUDA GPU. LTX-Video on CPU is extremely slow "
+            "and may take hours per clip. Streamlit Cloud CPU cannot provide "
+            "fast local video generation. Run this app on a CUDA-enabled GPU "
+            "machine to use the local LTX Animator."
+        )
+
+    # Enable faster CUDA kernels where supported.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    dtype = torch.float16
     model_id = os.getenv("ZI_VIDEO_MODEL", "Lightricks/LTX-Video").strip()
     pipeline_class = (
         LTXImageToVideoPipeline if mode == "image" else LTXPipeline
@@ -945,6 +956,7 @@ def load_ltx_video_pipeline(mode="text"):
             source,
             torch_dtype=dtype,
             force_download=force_download,
+            use_safetensors=True,
         )
 
     try:
@@ -960,32 +972,39 @@ def load_ltx_video_pipeline(mode="text"):
                 f"Could not load {model_id}: {first_error}"
             ) from first_error
 
-        # Force a fresh snapshot for this repository, then load from that path.
         try:
             local_snapshot = snapshot_download(
                 repo_id=model_id,
                 force_download=True,
-                resume_download=False,
+                resume_download=True,
             )
             pipe = _load(local_snapshot)
         except Exception as retry_error:
             raise RuntimeError(
-                "LTX-Video tokenizer/model files appear corrupted or the "
-                "download was interrupted. The app attempted one fresh model "
-                f"download but it failed: {retry_error}"
+                "LTX-Video files appear corrupted or the download was "
+                f"interrupted. Fresh download failed: {retry_error}"
             ) from retry_error
 
-    if torch.cuda.is_available():
+    # Keep weights on GPU for faster repeated inference when VRAM permits.
+    # Fall back to model CPU offload if the full pipeline cannot fit.
+    try:
+        pipe.to("cuda")
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        torch.cuda.empty_cache()
         pipe.enable_model_cpu_offload()
-    else:
-        pipe.to("cpu")
+
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+        pipe.vae.enable_slicing()
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
     return pipe
 
 
 def generate_local_video(prompt, mode="text", source_image=None,
-                         width=512, height=512, frames=25,
-                         steps=20, guidance=3.0):
-    """Generate an MP4 locally using LTX-Video. No hosted inference/API."""
+                         width=384, height=384, frames=17,
+                         steps=8, guidance=3.0):
+    """Generate a short MP4 with reduced-cost LTX settings."""
+    import torch
     from diffusers.utils import export_to_video
 
     pipe = load_ltx_video_pipeline(mode)
@@ -1000,20 +1019,40 @@ def generate_local_video(prompt, mode="text", source_image=None,
     if mode == "image":
         if source_image is None:
             raise ValueError("Upload a starting image for image-to-video.")
-        kwargs["image"] = ImageOps.exif_transpose(source_image).convert("RGB")
+        try:
+            if isinstance(source_image, Image.Image):
+                pil_source = source_image.copy()
+            elif hasattr(source_image, "getvalue"):
+                pil_source = Image.open(io.BytesIO(source_image.getvalue()))
+            elif hasattr(source_image, "read"):
+                source_image.seek(0)
+                pil_source = Image.open(io.BytesIO(source_image.read()))
+            else:
+                raise TypeError("Unsupported image upload object.")
+            pil_source.load()
+            kwargs["image"] = ImageOps.exif_transpose(pil_source).convert("RGB")
+        except Exception as exc:
+            raise ValueError(
+                "Could not decode the uploaded starting image. "
+                "Please upload a valid PNG, JPG or WEBP image."
+            ) from exc
 
-    result = pipe(**kwargs)
+    # Disable gradient tracking; inference does not need autograd.
+    with torch.inference_mode():
+        result = pipe(**kwargs)
+
     video_frames = result.frames[0]
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp:
         output_path = temp.name
-    export_to_video(video_frames, output_path, fps=8)
-    with open(output_path, "rb") as f:
-        video_bytes = f.read()
     try:
-        os.remove(output_path)
-    except OSError:
-        pass
-    return video_bytes
+        export_to_video(video_frames, output_path, fps=8)
+        with open(output_path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
 
 
 # ============================================================
@@ -2424,8 +2463,8 @@ elif st.session_state.page == "Zi AI Assistant":
 
     with animator_tab:
         st.title("🎬 Zi AI Animator")
-        st.caption("Open-weight LTX-Video running locally on your computer. No video API key or paid generation service.")
-        st.info("First run downloads the model weights from Hugging Face. After download, generation runs locally. Model download and inference require substantial disk space and compute resources.")
+        st.caption("LTX-Video local inference. No video API key or paid generation service.")
+        st.info("Fast generation requires a CUDA GPU. CPU-only Streamlit Cloud instances cannot generate LTX videos quickly. The first GPU run also downloads model weights.")
 
         mode = st.radio(
             "Generation mode",
@@ -2451,17 +2490,18 @@ elif st.session_state.page == "Zi AI Assistant":
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            video_size = st.selectbox("Resolution", ["512 × 512", "768 × 512", "512 × 768"], key="zi_animator_resolution")
+            video_size = st.selectbox("Resolution", ["384 × 384", "512 × 512", "768 × 512", "512 × 768"], index=0, key="zi_animator_resolution")
         with c2:
-            video_frames = st.selectbox("Frames", [17, 25, 33, 49], index=1, key="zi_animator_frames")
+            video_frames = st.selectbox("Frames", [17, 25, 33, 49], index=0, key="zi_animator_frames")
         with c3:
-            video_steps = st.selectbox("Quality steps", [10, 15, 20, 25], index=2, key="zi_animator_steps")
+            video_steps = st.selectbox("Quality steps", [4, 6, 8, 10, 15, 20], index=2, key="zi_animator_steps")
 
         width, height = [int(v.strip()) for v in video_size.split("×")]
         can_generate_video = bool(video_prompt.strip()) and (mode == "Text-to-Video" or start_image is not None)
         if st.button("🚀 Generate Video", type="primary", use_container_width=True, disabled=not can_generate_video, key="zi_animator_generate"):
             try:
-                with st.spinner("Loading local LTX-Video model and generating. First run may take time..."):
+                with st.spinner("Preparing the LTX model and generating a short video..."):
+                    # Reduced default workload: 384px, 17 frames, 8 steps.
                     video_data = generate_local_video(
                         video_prompt,
                         mode="image" if mode == "Image-to-Video" else "text",
