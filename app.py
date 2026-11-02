@@ -924,18 +924,56 @@ def generate_pollinations_image(prompt, aspect_ratio="1:1"):
 
 @st.cache_resource(show_spinner=False)
 def load_ltx_video_pipeline(mode="text"):
-    """Load the open-weight LTX-Video pipeline locally from Hugging Face."""
+    """Load LTX-Video and retry once if the Hugging Face cache is corrupt.
+
+    The retry deliberately targets this model's cache only. It does not delete
+    the entire Hugging Face cache and does not re-download on every rerun.
+    """
+    import shutil
     import torch
+    from huggingface_hub import snapshot_download
     from diffusers import LTXPipeline, LTXImageToVideoPipeline
 
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    model_id = os.getenv("ZI_VIDEO_MODEL", "Lightricks/LTX-Video")
-    if mode == "image":
-        pipe = LTXImageToVideoPipeline.from_pretrained(
-            model_id, torch_dtype=dtype
+    model_id = os.getenv("ZI_VIDEO_MODEL", "Lightricks/LTX-Video").strip()
+    pipeline_class = (
+        LTXImageToVideoPipeline if mode == "image" else LTXPipeline
+    )
+
+    def _load(source, force_download=False):
+        return pipeline_class.from_pretrained(
+            source,
+            torch_dtype=dtype,
+            force_download=force_download,
         )
-    else:
-        pipe = LTXPipeline.from_pretrained(model_id, torch_dtype=dtype)
+
+    try:
+        pipe = _load(model_id)
+    except Exception as first_error:
+        message = str(first_error).lower()
+        cache_related = any(term in message for term in (
+            "spiece.model", "error parsing line", "protobuf", "sentencepiece",
+            "incomplete", "corrupt", "invalid magic", "not a valid"
+        ))
+        if not cache_related:
+            raise RuntimeError(
+                f"Could not load {model_id}: {first_error}"
+            ) from first_error
+
+        # Force a fresh snapshot for this repository, then load from that path.
+        try:
+            local_snapshot = snapshot_download(
+                repo_id=model_id,
+                force_download=True,
+                resume_download=False,
+            )
+            pipe = _load(local_snapshot)
+        except Exception as retry_error:
+            raise RuntimeError(
+                "LTX-Video tokenizer/model files appear corrupted or the "
+                "download was interrupted. The app attempted one fresh model "
+                f"download but it failed: {retry_error}"
+            ) from retry_error
 
     if torch.cuda.is_available():
         pipe.enable_model_cpu_offload()
