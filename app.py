@@ -4,6 +4,10 @@ import base64
 import json
 import requests
 import tempfile
+import subprocess
+import math
+import random
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -66,7 +70,7 @@ DEFAULTS = {
     "assistant_tab": "Chat Assistant",
     "chat_image": None,
     "chat_input_counter": 0,
-    "zi_animator_video": None
+    "zi_cartoon_video": None
 }
 
 for key, value in DEFAULTS.items():
@@ -919,153 +923,212 @@ def generate_pollinations_image(prompt, aspect_ratio="1:1"):
 
 
 # ============================================================
-# MAGIC HOUR HOSTED VIDEO GENERATION — LTX-2.5
+# FREE 2D HINDI CARTOON STUDIO — PROCEDURAL ANIMATION
 # ============================================================
 
-def get_magic_hour_api_key():
-    """Read the Magic Hour key from Streamlit Secrets or environment."""
-    key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
-    if not key:
-        try:
-            key = str(st.secrets.get("MAGIC_HOUR_API_KEY", "")).strip()
-        except Exception:
-            key = ""
-    return key
+def _draw_cartoon_character(draw, cx, ground_y, frame_no, character, talking):
+    """Draw an original, simple Indian 2D cartoon character with moving limbs."""
+    palette = {
+        "Village Hero": {"shirt": "#E94B35", "shorts": "#2563EB", "skin": "#C98552", "hair": "#241A18"},
+        "Smart Girl": {"shirt": "#E85D9E", "shorts": "#6D45B5", "skin": "#B9784C", "hair": "#241A18"},
+        "Funny Friend": {"shirt": "#F0B323", "shorts": "#168B68", "skin": "#D49A6A", "hair": "#30221D"},
+    }
+    c = palette.get(character, palette["Village Hero"])
+    phase = frame_no * 0.22
+    bob = int(math.sin(phase * 2) * 4)
+    swing = math.sin(phase) * 17
+    cx = int(cx)
+    gy = ground_y + bob
+    # legs and simple running/walking cycle
+    hip_y = gy - 62
+    draw.line((cx-12, hip_y, cx-18+swing, gy), fill="#5A3828", width=12)
+    draw.line((cx+12, hip_y, cx+18-swing, gy), fill="#5A3828", width=12)
+    draw.ellipse((cx-30+swing, gy-5, cx-8+swing, gy+7), fill="#3B2B26")
+    draw.ellipse((cx+8-swing, gy-5, cx+30-swing, gy+7), fill="#3B2B26")
+    # torso
+    draw.rounded_rectangle((cx-30, gy-125, cx+30, gy-55), radius=17, fill=c["shirt"], outline="#472A25", width=3)
+    # arms swing independently
+    arm = math.sin(phase + 1.1) * 20
+    draw.line((cx-25, gy-112, cx-43-arm, gy-75), fill=c["skin"], width=12)
+    draw.line((cx+25, gy-112, cx+43+arm, gy-75), fill=c["skin"], width=12)
+    draw.ellipse((cx-50-arm, gy-83, cx-36-arm, gy-69), fill=c["skin"])
+    draw.ellipse((cx+36+arm, gy-83, cx+50+arm, gy-69), fill=c["skin"])
+    # neck and head
+    draw.rectangle((cx-9, gy-145, cx+9, gy-119), fill=c["skin"])
+    draw.ellipse((cx-39, gy-205, cx+39, gy-132), fill=c["skin"], outline="#472A25", width=3)
+    # hair cap + side tufts
+    draw.pieslice((cx-41, gy-212, cx+41, gy-150), 180, 360, fill=c["hair"], outline="#241A18")
+    draw.ellipse((cx-39, gy-184, cx-25, gy-164), fill=c["hair"])
+    draw.ellipse((cx+25, gy-184, cx+39, gy-164), fill=c["hair"])
+    # eyes and brows
+    draw.ellipse((cx-22, gy-178, cx-9, gy-161), fill="white")
+    draw.ellipse((cx+9, gy-178, cx+22, gy-161), fill="white")
+    draw.ellipse((cx-17, gy-173, cx-11, gy-164), fill="#211B1B")
+    draw.ellipse((cx+11, gy-173, cx+17, gy-164), fill="#211B1B")
+    draw.arc((cx-24, gy-188, cx-7, gy-176), 190, 345, fill="#241A18", width=3)
+    draw.arc((cx+7, gy-188, cx+24, gy-176), 190, 345, fill="#241A18", width=3)
+    # mouth switches while narration is active; deliberately simple 2D lip-sync
+    if talking:
+        draw.ellipse((cx-9, gy-157, cx+9, gy-143), fill="#67252A", outline="#472A25", width=2)
+    else:
+        draw.arc((cx-12, gy-161, cx+12, gy-146), 10, 170, fill="#67252A", width=3)
+    # cheek highlights
+    draw.ellipse((cx-29, gy-157, cx-19, gy-151), fill="#E99A8B")
+    draw.ellipse((cx+19, gy-157, cx+29, gy-151), fill="#E99A8B")
 
 
-def _find_mp4_file(folder):
-    for root, _, files in os.walk(folder):
-        for filename in files:
-            if filename.lower().endswith(".mp4"):
-                return os.path.join(root, filename)
-    return None
+def _draw_cartoon_background(draw, frame_no):
+    draw.rectangle((0, 0, 640, 360), fill="#8ED8F2")
+    # sun and clouds
+    draw.ellipse((520, 28, 580, 88), fill="#FFD45C")
+    for x, y in [(75, 65), (270, 42), (430, 105)]:
+        draw.ellipse((x, y, x+55, y+24), fill="#FFFFFF")
+        draw.ellipse((x+18, y-13, x+48, y+24), fill="#FFFFFF")
+    # distant hills
+    draw.ellipse((-100, 190, 300, 410), fill="#77C66E")
+    draw.ellipse((210, 175, 690, 410), fill="#5DBB67")
+    # village huts
+    for x in (55, 455):
+        draw.rectangle((x, 205, x+105, 285), fill="#F5D59A", outline="#7A4A2D", width=3)
+        draw.polygon([(x-10, 208), (x+52, 158), (x+115, 208)], fill="#B95D3D", outline="#7A3B2A")
+        draw.rectangle((x+40, 235, x+66, 285), fill="#845234")
+    # ground
+    draw.rectangle((0, 285, 640, 360), fill="#79B94D")
+    draw.line((0, 285, 640, 285), fill="#4D963F", width=4)
+    # small flowers
+    for x in range(25, 640, 75):
+        yy = 315 + int(math.sin(frame_no * .1 + x) * 3)
+        draw.ellipse((x, yy, x+7, yy+7), fill="#FFE66D")
 
 
-def _find_download_url(value):
-    """Best-effort extraction for SDK versions returning a download URL."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key.lower() in {"url", "download_url", "video_url"} and isinstance(item, str) and item.startswith("http"):
-                return item
-            found = _find_download_url(item)
-            if found:
-                return found
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            found = _find_download_url(item)
-            if found:
-                return found
-    elif hasattr(value, "model_dump"):
-        try:
-            return _find_download_url(value.model_dump())
-        except Exception:
-            pass
-    elif hasattr(value, "__dict__"):
-        return _find_download_url(vars(value))
-    return None
+def generate_free_hindi_cartoon(script_text, character="Village Hero", voice="hi", fps=20):
+    """Create a procedural 2D cartoon MP4 with gTTS and FFmpeg.
 
-
-def generate_magic_hour_video(prompt, mode="text", source_image=None,
-                              duration=5, resolution="480p",
-                              orientation="landscape", audio=True):
-    """Generate an MP4 through Magic Hour's hosted LTX-2.5 API.
-
-    No local Diffusers/PyTorch video model is loaded. Magic Hour handles
-    GPU inference. The API key must be in Streamlit Secrets or environment.
+    This is lightweight 2D procedural animation, not neural or phoneme-accurate
+    lip-sync. FFmpeg stderr is written to a temporary log so an early encoder
+    exit produces its real diagnostic instead of an unhelpful Broken pipe.
     """
-    api_key = get_magic_hour_api_key()
-    if not api_key:
-        raise RuntimeError(
-            "Magic Hour API key is missing. Add MAGIC_HOUR_API_KEY to "
-            "Streamlit Cloud → App settings → Secrets. Do not put the key in app.py."
+    if not script_text or not script_text.strip():
+        raise ValueError("Hindi story/dialogue likho pehle.")
+    if len(script_text) > 2500:
+        raise ValueError(
+            "Free preview limit: 2,500 characters per video. "
+            "Script ko scenes mein divide karo."
         )
-
-    if not prompt or not prompt.strip():
-        raise ValueError("Enter a video prompt first.")
-
     try:
-        from magic_hour import Client
+        import imageio_ffmpeg
     except ImportError as exc:
         raise RuntimeError(
-            "Magic Hour SDK is not installed. Add magic-hour to requirements.txt "
-            "and redeploy the app."
+            "imageio-ffmpeg missing hai. requirements.txt update karke redeploy karo."
         ) from exc
 
-    client = Client(token=api_key)
-    duration = int(duration)
-    if duration < 1 or duration > 60:
-        raise ValueError("Video duration must be between 1 and 60 seconds.")
-
-    with tempfile.TemporaryDirectory(prefix="zi_magic_hour_") as workdir:
-        common = {
-            "end_seconds": float(duration),
-            "name": "Zi Nova AI - LTX-2.5",
-            "model": "ltx-2.5",
-            "resolution": resolution,
-            "audio": bool(audio),
-            "wait_for_completion": True,
-            "download_outputs": True,
-            "download_directory": workdir,
-        }
+    with tempfile.TemporaryDirectory(prefix="zi_cartoon_") as workdir:
+        audio_path = os.path.join(workdir, "hindi_voice.mp3")
+        output_path = os.path.join(workdir, "zi_hindi_cartoon.mp4")
+        stderr_path = os.path.join(workdir, "ffmpeg_error.log")
 
         try:
-            if mode == "image":
-                if source_image is None:
-                    raise ValueError("Upload a starting image for image-to-video.")
-                try:
-                    if isinstance(source_image, Image.Image):
-                        pil_image = source_image.copy()
-                    elif hasattr(source_image, "getvalue"):
-                        pil_image = Image.open(io.BytesIO(source_image.getvalue()))
-                    else:
-                        source_image.seek(0)
-                        pil_image = Image.open(io.BytesIO(source_image.read()))
-                    pil_image = ImageOps.exif_transpose(pil_image).convert("RGB")
-                    image_path = os.path.join(workdir, "starting_frame.png")
-                    pil_image.save(image_path, format="PNG")
-                except Exception as exc:
-                    raise ValueError(
-                        "Could not read the uploaded image. Use a valid PNG, JPG or WEBP."
-                    ) from exc
-
-                result = client.v1.image_to_video.generate(
-                    assets={"image_file_path": image_path},
-                    style={"prompt": prompt.strip()},
-                    **common,
-                )
-            else:
-                result = client.v1.text_to_video.generate(
-                    orientation=orientation,
-                    style={"prompt": prompt.strip()},
-                    **common,
-                )
+            gTTS(text=script_text, lang=voice, slow=False).save(audio_path)
         except Exception as exc:
-            message = str(exc)
-            if "401" in message or "Unauthorized" in message:
-                raise RuntimeError("Magic Hour rejected the API key (401). Check MAGIC_HOUR_API_KEY.") from exc
-            if "402" in message or "Payment required" in message:
-                raise RuntimeError("Magic Hour credits are insufficient (402). Check your API balance before retrying.") from exc
-            if "422" in message:
-                raise RuntimeError(f"Magic Hour rejected the request parameters (422): {message}") from exc
-            raise RuntimeError(f"Magic Hour video generation failed: {message}") from exc
+            raise RuntimeError(
+                f"Hindi voice generate nahi hui. Internet/TTS connection check karo: {exc}"
+            ) from exc
 
-        mp4_path = _find_mp4_file(workdir)
-        if mp4_path:
-            with open(mp4_path, "rb") as video_file:
-                return video_file.read()
+        if not os.path.isfile(audio_path) or os.path.getsize(audio_path) == 0:
+            raise RuntimeError("Hindi TTS ne empty audio file return ki.")
 
-        download_url = _find_download_url(result)
-        if download_url:
-            response = requests.get(download_url, timeout=180)
-            response.raise_for_status()
-            if not response.content:
-                raise RuntimeError("Magic Hour returned an empty video file.")
-            return response.content
+        words = max(1, len(script_text.split()))
+        # Render enough video for the estimated narration. Do not use FFmpeg
+        # -shortest: it can stop reading raw frames as soon as short audio ends,
+        # while Python is still writing frames, causing [Errno 32] Broken pipe.
+        frame_count = min(3600, max(240, int((words / 1.15 + 12) * fps)))
 
-        raise RuntimeError(
-            "Magic Hour job completed, but the SDK did not provide a downloaded MP4. "
-            "Check the SDK version and job result in the Magic Hour dashboard."
-        )
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        command = [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24", "-s", "640x360", "-r", str(fps), "-i", "-",
+            "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", output_path
+        ]
+
+        with open(stderr_path, "wb") as stderr_file:
+            try:
+                proc = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    bufsize=0
+                )
+            except OSError as exc:
+                raise RuntimeError(f"FFmpeg process start nahi hua: {exc}") from exc
+
+            try:
+                for frame_no in range(frame_count):
+                    if proc.poll() is not None:
+                        break
+
+                    frame = Image.new("RGB", (640, 360))
+                    from PIL import ImageDraw
+                    draw = ImageDraw.Draw(frame)
+                    _draw_cartoon_background(draw, frame_no)
+
+                    cx = 320 + math.sin(frame_no * 0.035) * 28
+                    # Procedural mouth movement; approximate, not phoneme sync.
+                    speaking = (frame_no % 8) < 5
+                    _draw_cartoon_character(
+                        draw, cx, 286, frame_no, character, speaking
+                    )
+                    draw.rounded_rectangle(
+                        (12, 12, 260, 42), radius=10, fill="#17324D"
+                    )
+                    draw.text(
+                        (24, 20), "ZEE NOVA • HINDI CARTOON", fill="white"
+                    )
+
+                    try:
+                        proc.stdin.write(frame.tobytes())
+                    except (BrokenPipeError, OSError):
+                        # FFmpeg has exited; collect its diagnostic below.
+                        break
+
+                if proc.stdin and not proc.stdin.closed:
+                    try:
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+
+                return_code = proc.wait(timeout=180)
+            except Exception:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+                raise
+
+        with open(stderr_path, "rb") as log_file:
+            ffmpeg_error = log_file.read().decode("utf-8", "ignore").strip()
+
+        if return_code != 0:
+            details = ffmpeg_error[-1800:] or "FFmpeg exited without diagnostic output."
+            raise RuntimeError(
+                f"FFmpeg export failed (exit code {return_code}). Details: {details}"
+            )
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) < 1024:
+            details = ffmpeg_error[-1200:] or "Output MP4 was not created."
+            raise RuntimeError(f"Video export failed. Details: {details}")
+
+        with open(output_path, "rb") as video_file:
+            video_bytes = video_file.read()
+
+        if not video_bytes:
+            raise RuntimeError("Video export empty aaya. Dobara try karo.")
+
+        return video_bytes
 
 
 # ============================================================
@@ -1310,7 +1373,11 @@ def generate_text(prompt, history=None):
             "You are Zi, the intelligent assistant inside Zi Nova AI. "
             "Answer accurately, clearly and directly. "
             "Do not invent facts, sources or actions. "
-            "If uncertain, say so."
+            "If uncertain, say so. "
+            "When the user requests a website or runnable frontend, provide "
+            "complete runnable HTML in a fenced ```html code block; put "
+            "additional styles in a fenced ```css block and browser JavaScript "
+            "in a fenced ```javascript block. Keep explanations outside code blocks."
         )
     }]
 
@@ -1494,6 +1561,120 @@ Rules:
 # ============================================================
 # 11. CHAT ASSISTANT HELPERS
 # ============================================================
+
+_CODE_FENCE_RE = re.compile(
+    r"```(?P<lang>[\w+#.-]*)[ \t]*\n(?P<code>.*?)```",
+    re.DOTALL
+)
+
+
+def _build_live_preview_document(html_code, css_code="", js_code=""):
+    """Build a self-contained HTML document for the isolated preview iframe."""
+    document = (html_code or "").strip()
+
+    if not document:
+        document = "<!doctype html><html><head><meta charset='utf-8'></head><body></body></html>"
+
+    if not re.search(r"<\s*html[\s>]|<!doctype\s+html", document, re.I):
+        document = (
+            "<!doctype html><html><head><meta charset='utf-8'></head>"
+            "<body>" + document + "</body></html>"
+        )
+
+    if css_code.strip():
+        style_tag = "<style>\n" + css_code + "\n</style>"
+        if re.search(r"</head\s*>", document, re.I):
+            document = re.sub(
+                r"</head\s*>",
+                lambda match: style_tag + match.group(0),
+                document,
+                count=1,
+                flags=re.I
+            )
+        else:
+            document = style_tag + document
+
+    if js_code.strip():
+        script_tag = "<script>\n" + js_code + "\n</script>"
+        if re.search(r"</body\s*>", document, re.I):
+            document = re.sub(
+                r"</body\s*>",
+                lambda match: script_tag + match.group(0),
+                document,
+                count=1,
+                flags=re.I
+            )
+        else:
+            document += script_tag
+
+    return document
+
+
+def render_assistant_message(content, message_index):
+    """Render normal Markdown and add Preview/Code tabs for HTML responses."""
+    content = str(content or "")
+    blocks = list(_CODE_FENCE_RE.finditer(content))
+
+    html_blocks = []
+    css_blocks = []
+    js_blocks = []
+    for match in blocks:
+        language = (match.group("lang") or "").lower()
+        code = match.group("code").strip("\n")
+        if language in {"html", "htm", "xhtml"} or (
+            not language and re.search(r"<!doctype\s+html|<\s*html[\s>]|<\s*body[\s>]|<\s*div[\s>]", code, re.I)
+        ):
+            html_blocks.append(code)
+        elif language == "css":
+            css_blocks.append(code)
+        elif language in {"js", "javascript"}:
+            js_blocks.append(code)
+
+    if not html_blocks:
+        st.markdown(content, unsafe_allow_html=False)
+        return
+
+    # Render prose before/between/after code fences, excluding code blocks handled below.
+    cursor = 0
+    for match in blocks:
+        preceding = content[cursor:match.start()].strip()
+        if preceding:
+            st.markdown(preceding, unsafe_allow_html=False)
+
+        language = (match.group("lang") or "").lower()
+        code = match.group("code").strip("\n")
+        if language not in {"html", "htm", "xhtml", "css", "js", "javascript"}:
+            st.code(code, language=language or None)
+
+        cursor = match.end()
+    trailing = content[cursor:].strip()
+    if trailing:
+        st.markdown(trailing, unsafe_allow_html=False)
+
+    full_source = "\n\n".join(html_blocks)
+    if css_blocks:
+        full_source += "\n\n/* Additional CSS */\n" + "\n\n".join(css_blocks)
+    if js_blocks:
+        full_source += "\n\n// Additional JavaScript\n" + "\n\n".join(js_blocks)
+
+    preview_document = _build_live_preview_document(
+        "\n\n".join(html_blocks),
+        "\n\n".join(css_blocks),
+        "\n\n".join(js_blocks)
+    )
+
+    preview_tab, code_tab = st.tabs(["◉ Preview", "</> Code"])
+    with preview_tab:
+        st.caption("Live preview runs in an isolated browser frame. External services and server-side code are not executed.")
+        components.html(
+            preview_document,
+            height=620,
+            scrolling=True
+        )
+    with code_tab:
+        st.code(full_source, language="html")
+
+
 
 def start_new_chat():
     st.session_state.messages = []
@@ -1857,13 +2038,13 @@ elif st.session_state.page == "Caption Studio":
 elif st.session_state.page == "Zi AI Assistant":
 
     if not require_api_key():
-        st.stop()
+        st.warning("Groq API key ke bina Chat, Voice aur AI Image features unavailable rahenge. Free 2D Hindi Cartoon Studio bina Groq key ke bhi use kar sakte ho.")
 
-    chat_tab, voice_tab, image_tab, animator_tab = st.tabs([
+    chat_tab, voice_tab, image_tab, cartoon_tab = st.tabs([
         "◈ Chat Assistant",
         "🎙️ AI Voice Assistant",
         "🎨 AI Image Generation",
-        "🎬 Zi AI Animator"
+        "🎬 2D Hindi Cartoon Studio"
     ])
 
     # --------------------------------------------------------
@@ -2011,7 +2192,7 @@ elif st.session_state.page == "Zi AI Assistant":
 
         else:
 
-            for message in st.session_state.messages:
+            for message_index, message in enumerate(st.session_state.messages):
 
                 if message["role"] == "user":
 
@@ -2021,9 +2202,9 @@ elif st.session_state.page == "Zi AI Assistant":
                 else:
 
                     with st.chat_message("assistant"):
-                        st.markdown(
+                        render_assistant_message(
                             message["content"],
-                            unsafe_allow_html=False
+                            message_index
                         )
 
             if st.session_state.last_sources:
@@ -2471,77 +2652,255 @@ elif st.session_state.page == "Zi AI Assistant":
 
 
     # --------------------------------------------------------
-    # 16D. ZI AI ANIMATOR — MAGIC HOUR LTX-2.5 API
+    # 16D. FREE 2D HINDI CARTOON STUDIO
     # --------------------------------------------------------
 
-    with animator_tab:
-        st.title("🎬 Zi AI Animator")
-        st.caption("Hosted video generation powered by Magic Hour LTX-2.5. No local GPU or Diffusers model required.")
-        if not get_magic_hour_api_key():
-            st.warning("Add MAGIC_HOUR_API_KEY in Streamlit Cloud → App settings → Secrets to enable video generation.")
 
-        mode = st.radio(
-            "Generation mode",
-            ["Text-to-Video", "Image-to-Video"],
-            horizontal=True,
-            key="zi_animator_mode"
-        )
-        video_prompt = st.text_area(
-            "Describe the video",
-            placeholder="A cinematic shot of a futuristic city at sunset, camera slowly pushing forward...",
-            height=120,
-            key="zi_animator_prompt"
-        )
-        start_image = None
-        if mode == "Image-to-Video":
-            start_image = st.file_uploader(
-                "Upload starting image",
-                type=["png", "jpg", "jpeg", "webp"],
-                key="zi_animator_start_image"
-            )
-            if start_image:
-                st.image(start_image, caption="Starting frame", use_container_width=True)
+    with cartoon_tab:
+        from zi_nova_cartoon_engine import CAST, DEFAULT_VOICES, parse_screenplay, render_episode, build_episode_manifest, safe_stem
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            video_duration = st.selectbox("Duration", [5, 6, 8, 10], index=0, key="zi_animator_duration")
-        with c2:
-            video_resolution = st.selectbox("Resolution", ["480p", "720p", "1080p"], index=0, key="zi_animator_api_resolution")
-        with c3:
-            video_orientation = st.selectbox("Orientation", ["landscape", "portrait"], index=0, key="zi_animator_orientation")
+        st.title("🎬 Zee Nova 2D Cartoon Studio")
+        st.caption("Aligarh Ki Kahaniyan · Story · Character assets · Hindi dialogue · Scene timeline · MP4 rendering")
+        st.info("This adds a scene-based 2D compositing pipeline. Existing Zi Nova workspaces, APIs, sidebar, themes and integrations are preserved.")
+        studio_root = BASE_DIR / "assets"
+        cutout_dir, background_dir = studio_root / "characters_cutouts", studio_root / "backgrounds"
+        reference_dir = studio_root / "character_references"
+        export_dir = BASE_DIR / "exports"
+        for folder in (cutout_dir, background_dir, reference_dir, export_dir): folder.mkdir(parents=True, exist_ok=True)
 
-        audio_enabled = st.checkbox("Generate audio", value=True, key="zi_animator_audio")
-        can_generate_video = bool(video_prompt.strip()) and (mode == "Text-to-Video" or start_image is not None)
-        if st.button("🚀 Generate Video", type="primary", use_container_width=True, disabled=not can_generate_video, key="zi_animator_generate"):
-            try:
-                with st.spinner("Sending your request to Magic Hour LTX-2.5. Generation runs on hosted GPUs..."):
-                    video_data = generate_magic_hour_video(
-                        video_prompt,
-                        mode="image" if mode == "Image-to-Video" else "text",
-                        source_image=start_image,
-                        duration=video_duration,
-                        resolution=video_resolution,
-                        orientation=video_orientation,
-                        audio=audio_enabled,
-                    )
-                st.session_state.zi_animator_video = video_data
-                st.success("Video generated successfully.")
-            except Exception as error:
-                st.error(f"Video generation failed: {error}")
-                st.caption("Check your Magic Hour API key, available credits, model access and selected settings.")
+        asset_tab, story_tab, voice_tab, render_tab, files_tab = st.tabs([
+            "🎭 Character & Art Assets", "✍️ Story & Screenplay", "🎙️ Voice Direction", "🎞️ Timeline & Render", "📦 Episode Files"
+        ])
 
-        if st.session_state.get("zi_animator_video"):
+        with asset_tab:
+            st.subheader("Original character identity references")
+            st.caption("Your six original character reference artworks remain preserved. They are not falsely treated as transparent animation rigs.")
+            cols = st.columns(3)
+            for i, name in enumerate(CAST):
+                with cols[i % 3]:
+                    ref = reference_dir / f"{name}.png"
+                    if ref.exists():
+                        st.image(str(ref), caption=name, use_container_width=True)
+                        if st.button(f"✂️ Create transparent {name} cut-out", key=f"zee_auto_cutout_{name}", use_container_width=True):
+                            try:
+                                from rembg import remove
+                                from PIL import Image as PILImage
+                                source = PILImage.open(ref).convert("RGB")
+                                # Supplied reference artwork places the character left of its wooden nameplate.
+                                crop = source.crop((0, 0, int(source.width * 0.76), source.height))
+                                buf = io.BytesIO()
+                                crop.save(buf, format="PNG")
+                                with st.spinner(f"Removing background from {name}..."):
+                                    cutout_bytes = remove(buf.getvalue())
+                                cutout = PILImage.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+                                if cutout.getchannel("A").getextrema() == (255, 255):
+                                    st.error("Background remover returned no transparency. Try uploading a manually prepared transparent PNG.")
+                                else:
+                                    cutout.save(cutout_dir / f"{name}.png", "PNG", optimize=True)
+                                    st.success(f"Transparent cut-out prepared for {name}. Review it before episode rendering.")
+                                    st.image(cutout, width=180)
+                            except ImportError:
+                                st.error("Background removal package missing. Install with: pip install rembg[cpu]")
+                            except Exception as cutout_error:
+                                st.error(f"Cut-out preparation failed: {cutout_error}")
+                    else: st.markdown(f"**{name}**")
             st.divider()
-            st.subheader("Generated video")
-            st.video(st.session_state.zi_animator_video)
-            st.download_button(
-                "⬇️ Download MP4",
-                data=st.session_state.zi_animator_video,
-                file_name="zi_nova_ai_video.mp4",
-                mime="video/mp4",
-                use_container_width=True,
-                key="zi_animator_download"
-            )
+            st.subheader("Animation-ready character cut-outs")
+            st.warning("Upload one full-body transparent PNG per character. A flattened poster with its village background cannot be cleanly rigged or composited as a sprite.")
+            for name in CAST:
+                with st.expander(f"{name} sprite", expanded=False):
+                    up = st.file_uploader(f"Transparent {name} PNG", type=["png", "webp"], key=f"zee_cutout_{name}")
+                    if up:
+                        try:
+                            from PIL import Image as PILImage
+                            im = PILImage.open(up).convert("RGBA")
+                            if im.getchannel("A").getextrema() == (255, 255):
+                                st.error("No transparency detected. Upload a background-removed PNG.")
+                            else:
+                                im.save(cutout_dir / f"{name}.png", "PNG", optimize=True)
+                                st.success(f"Saved {name} · {im.width}×{im.height}")
+                                st.image(im, width=170)
+                        except Exception as exc: st.error(str(exc))
+            sprites = list(cutout_dir.glob("*.png"))
+            st.caption(f"Ready transparent sprites: {len(sprites)} / 6")
+            st.divider()
+            st.subheader("Illustrated background plates")
+            uploads = st.file_uploader("Upload multiple village / forest / river / school / market backgrounds", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="zee_bg_uploads")
+            if uploads:
+                from PIL import Image as PILImage
+                for up in uploads:
+                    try:
+                        im = PILImage.open(up).convert("RGB")
+                        im.save(background_dir / (safe_stem(Path(up.name).stem) + ".jpg"), "JPEG", quality=94, optimize=True)
+                    except Exception as exc: st.error(f"{up.name}: {exc}")
+                st.success("Background plates saved.")
+            st.markdown("#### Generate a reusable background with Gemini")
+            bg_prompt = st.text_area("Background art prompt", "Wide 16:9 hand-painted 2D Indian children's cartoon background of Ali Garh village, warm morning light, colorful village homes, trees and a clean open foreground. No people, no characters, no text, no logos. Consistent polished television animation background art.", height=85, key="zee_bg_prompt")
+            if st.button("🌄 Generate background plate", key="zee_generate_bg", use_container_width=True):
+                if not GEMINI_API_KEY:
+                    st.error("Add GEMINI_API_KEY to .env to use the existing Gemini image integration.")
+                else:
+                    try:
+                        with st.spinner("Generating background artwork with Gemini..."):
+                            bg_bytes = generate_ai_image(bg_prompt, aspect_ratio="16:9", image_size="1K")
+                        bg_name = "ai_background_" + str(len(list(background_dir.iterdir())) + 1) + ".png"
+                        (background_dir / bg_name).write_bytes(bg_bytes)
+                        st.success("Background plate generated and saved.")
+                        st.image(bg_bytes, caption=bg_name, use_container_width=True)
+                    except Exception as bg_gen_error:
+                        st.error(f"Background generation failed: {bg_gen_error}")
+            bgs = sorted([x for x in background_dir.iterdir() if x.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")])
+            if bgs:
+                bc = st.columns(3)
+                for i, bg in enumerate(bgs):
+                    with bc[i % 3]: st.image(str(bg), caption=bg.stem, use_container_width=True)
+            else: st.info("Upload illustrated 16:9 backgrounds to start building reusable episode worlds.")
+
+        with story_tab:
+            st.subheader("Episode development")
+            c1, c2 = st.columns(2)
+            with c1:
+                title = st.text_input("Episode title", "Ali Garh Ka Rahasyamayi Jungle", key="zee_ep_title_input")
+                duration = st.select_slider("Target duration", [2, 3, 5, 8, 10, 15, 20], value=5, format_func=lambda x: f"{x} min")
+            with c2:
+                tone = st.selectbox("Story tone", ["Adventure + comedy", "Mystery + adventure", "Comedy + friendship", "Educational adventure", "Emotional + family", "Fantasy adventure"])
+                audience = st.selectbox("Audience", ["Kids 5–8", "Kids 8–12", "Family audience"])
+            premise = st.text_area("Story idea", "Ali Garh ke jungle mein ek purana darakht raat ko roshni dene lagta hai. Zohan aur uske dost iska raaz jaanne nikalte hain.", height=90, key="zee_ep_premise_input")
+            selected_cast = st.multiselect("Characters in this episode", CAST, default=CAST, key="zee_ep_cast_input")
+            rules = st.text_area("Continuity rules", "Original stories only. Preserve each character's identity. Anaya has no bindi or makeup. All characters are Muslim. Do not copy Chhota Bheem characters, scenes, logos or storylines.", height=75)
+            if st.button("✦ Generate Hindi screenplay + scene breakdown", type="primary", use_container_width=True, key="zee_generate_screenplay"):
+                if not GROQ_API_KEY: st.error("Add GROQ_API_KEY to .env to generate the screenplay. Manual editing below still works.")
+                elif not premise.strip(): st.warning("Enter a story idea first.")
+                else:
+                    prompt = f"""Write an ORIGINAL production-ready Hindi children's cartoon screenplay for Aligarh Ki Kahaniyan, Ali Garh. Title: {title}. Premise: {premise}. Tone: {tone}. Audience: {audience}. Duration: {duration} minutes. Cast: {', '.join(selected_cast)}. Rules: {rules}. Use natural spoken Hindi in Devanagari. Include a hook, clear problem, clues, teamwork, escalating stakes, climax and satisfying ending. Give visual actions, character reactions, shot direction and ambience. Output only this structure with enough scenes for the duration:
+SCENE: title
+[ACTION]: visual direction, movement, camera shot and sound ambience
+[Zohan]: Hindi dialogue
+[Anaya]: Hindi dialogue
+---
+Use only selected cast names and [NARRATOR]. 2-5 short dialogue lines per scene. No markdown fences."""
+                    try:
+                        with st.spinner("Writing episode screenplay..."): generated = generate_text(prompt)
+                        st.session_state["zee_screenplay_text"] = generated
+                        st.session_state["zee_episode_title"] = title
+                        st.success("Draft generated. Review and edit before production.")
+                    except Exception as exc: st.error(f"Screenplay generation failed: {exc}")
+            starter = "SCENE: Ali Garh ki subah\n[ACTION]: Wide establishing shot of Ali Garh. Birds chirp as the camera moves towards the old banyan tree.\n[Zohan]: Dosto, aaj jungle ke paas kuch ajeeb hone wala hai!\n[Anaya]: Pehle humein pata toh chale ki awaaz kahan se aa rahi hai.\n[Madiha]: Zameen par kuch nishaan hain. Sab dhyaan se dekho.\n---\nSCENE: Jungle ka raaz\n[ACTION]: The friends enter the forest. Leaves move in the wind. A mysterious blue light flashes behind the tree.\n[Izhan]: Upar dekho! Woh darakht chamak raha hai!\n[Mariyam]: Humein milkar iska raaz jaanchna chahiye.\n[Ayesha]: Main darr nahi rahi... bas thoda surprise hoon!\n---\nSCENE: Dosti ki jeet\n[ACTION]: The friends discover a trapped lantern and help a lost traveller. Camera pulls back to sunset.\n[Zohan]: Himmat aur teamwork se mushkil aasaan ho jaati hai!\n[Anaya]: Aur bina saboot ke kisi par shaq nahi karna chahiye.\n[NARRATOR]: Ali Garh ke doston ne seekha ki milkar har mushkil hal ho sakti hai."
+            screenplay = st.text_area("Screenplay editor — SCENE:, [ACTION]:, [Character]: dialogue; separate scenes with ---", value=st.session_state.get("zee_screenplay_text", starter), height=420, key="zee_screenplay_editor")
+            if st.button("Parse screenplay into scene timeline", key="zee_parse_screenplay"):
+                parsed = parse_screenplay(screenplay)
+                st.session_state["zee_parsed_scenes"] = parsed
+                st.session_state["zee_screenplay_text"] = screenplay
+                st.session_state["zee_episode_title"] = title
+                st.success(f"Parsed {len(parsed)} scenes · {sum(len(x['dialogues']) for x in parsed)} dialogue lines.")
+            parsed = st.session_state.get("zee_parsed_scenes", [])
+            if parsed:
+                st.metric("Parsed scenes", len(parsed))
+                with st.expander("Review scene breakdown"):
+                    for scene in parsed:
+                        st.markdown(f"**{scene['index']}. {scene['title']}**")
+                        if scene.get("action"): st.caption(scene["action"])
+                        for line in scene["dialogues"]: st.write(f"{line['speaker']}: {line['text']}")
+
+        with voice_tab:
+            st.subheader("Hindi voice direction")
+            st.caption("Edge neural Hindi TTS is preferred. gTTS is a fallback and does not create six distinct character voices.")
+            voice_options = ["hi-IN-MadhurNeural", "hi-IN-SwaraNeural"]
+            profiles = {}
+            for name in CAST:
+                d = DEFAULT_VOICES[name]
+                with st.expander(f"🎙️ {name}", expanded=(name == "Zohan")):
+                    v1, v2 = st.columns(2)
+                    voice = v1.selectbox("Neural voice", voice_options, index=voice_options.index(d["voice"]), key=f"zee_voice_{name}")
+                    rate_options = ["-15%", "-10%", "-5%", "+0%", "+2%", "+4%", "+5%", "+9%", "+10%", "+12%", "+15%"]
+                    pitch_options = ["-8Hz", "-4Hz", "-2Hz", "+0Hz", "+2Hz", "+4Hz", "+7Hz", "+8Hz", "+12Hz"]
+
+                    # Defensive validation: DEFAULT_VOICES and persisted Streamlit
+                    # widget state must match the available slider options exactly.
+                    rate_key = f"zee_rate_{name}"
+                    pitch_key = f"zee_pitch_{name}"
+                    rate_default = d.get("rate", "+0%")
+                    pitch_default = d.get("pitch", "+0Hz")
+                    if rate_default not in rate_options:
+                        rate_default = "+0%"
+                    if pitch_default not in pitch_options:
+                        pitch_default = "+0Hz"
+                    if rate_key in st.session_state and st.session_state[rate_key] not in rate_options:
+                        del st.session_state[rate_key]
+                    if pitch_key in st.session_state and st.session_state[pitch_key] not in pitch_options:
+                        del st.session_state[pitch_key]
+
+                    rate = v2.select_slider(
+                        "Speaking rate", rate_options, value=rate_default, key=rate_key
+                    )
+                    pitch = st.select_slider(
+                        "Pitch", pitch_options, value=pitch_default, key=pitch_key
+                    )
+                    profiles[name] = {"voice": voice, "rate": rate, "pitch": pitch}
+            st.session_state["zee_voice_profiles"] = profiles
+            st.info("The available neural voice selection has two Hindi base voices with per-character pitch/rate direction. It is not six independently trained voice actors. For genuinely unique performances, use separately recorded or licensed character voice tracks.")
+
+        with render_tab:
+            st.subheader("Scene timeline & episode render")
+            scenes = st.session_state.get("zee_parsed_scenes", [])
+            bgs = sorted([x for x in background_dir.iterdir() if x.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")])
+            sprites = {x.stem: str(x) for x in cutout_dir.glob("*.png")}
+            if not scenes: st.warning("Parse a screenplay in the Story & Screenplay tab first.")
+            else:
+                bg_names = [x.name for x in bgs]
+                for idx, scene in enumerate(scenes):
+                    with st.expander(f"SHOT {idx+1:02d} · {scene['title']}", expanded=(idx == 0)):
+                        st.write(scene.get("action", "No visual direction"))
+                        speakers = list(dict.fromkeys(d["speaker"] for d in scene.get("dialogues", [])))
+                        used = [n for n in speakers if n in CAST]
+                        st.caption("Dialogue cast: " + (", ".join(used) if used else "Narration only"))
+                        if bgs:
+                            old = scene.get("background", bg_names[min(idx, len(bg_names)-1)])
+                            if old not in bg_names: old = bg_names[min(idx, len(bg_names)-1)]
+                            scene["background"] = st.selectbox("Background", bg_names, index=bg_names.index(old), key=f"zee_scene_bg_{idx}")
+                        current_cast = scene.get("characters") or used
+                        scene["characters"] = st.multiselect("Characters visible in this shot", CAST, default=[n for n in current_cast if n in CAST], key=f"zee_scene_cast_{idx}")
+                        missing = [n for n in scene["characters"] if n not in sprites]
+                        if missing: st.warning("Missing transparent sprites: " + ", ".join(missing))
+                        st.caption(f"{len(scene.get('dialogues', []))} dialogue lines · camera push/pan · subtitle timing")
+                st.session_state["zee_parsed_scenes"] = scenes
+                r1, r2 = st.columns(2)
+                with r1:
+                    resolution = st.selectbox("Resolution", ["1080p", "720p"], key="zee_resolution")
+                    fps = st.selectbox("Frame rate", [25, 24, 30], index=0, key="zee_fps")
+                with r2:
+                    st.metric("Scenes", len(scenes)); st.metric("Cut-outs ready", f"{len(sprites)} / 6")
+                speakers = {d["speaker"] for scene in scenes for d in scene.get("dialogues", [])}
+                on_screen = {n for scene in scenes for n in scene.get("characters", [])}
+                missing_sprites = sorted(n for n in (speakers | on_screen) if n in CAST and n not in sprites)
+                if missing_sprites: st.error("Upload transparent cut-outs for: " + ", ".join(missing_sprites))
+                elif not bgs: st.error("Upload at least one background plate in Character & Art Assets.")
+                elif st.button("🎬 Render complete Hindi cartoon episode", type="primary", use_container_width=True, key="zee_render_episode"):
+                    out = export_dir / (safe_stem(st.session_state.get("zee_episode_title", "aligarh_episode")) + "_" + resolution.lower() + ".mp4")
+                    bar = st.progress(0.0, text="Preparing Hindi voice tracks...")
+                    try:
+                        render_episode(scenes, sprites, {x.name: str(x) for x in bgs}, st.session_state.get("zee_voice_profiles", DEFAULT_VOICES), str(out), resolution, fps, lambda v: bar.progress(v, text=f"Rendering: {int(v*100)}%"))
+                        st.session_state["zee_last_episode_path"] = str(out)
+                        st.success("Episode MP4 rendered.")
+                        st.video(str(out))
+                        st.download_button("⬇️ Download MP4", out.read_bytes(), file_name=out.name, mime="video/mp4", key="zee_download_episode")
+                    except Exception as exc:
+                        st.error(f"Render failed: {exc}")
+                        st.info("Verify Edge TTS / internet, FFmpeg, transparent character PNGs and background files.")
+
+        with files_tab:
+            scenes = st.session_state.get("zee_parsed_scenes", [])
+            title = st.session_state.get("zee_episode_title", "Aligarh Ki Kahaniyan Episode")
+            manifest = build_episode_manifest(title, scenes, CAST, st.session_state.get("zee_resolution", "1080p"), int(st.session_state.get("zee_fps", 25)))
+            manifest["voice_profiles"] = st.session_state.get("zee_voice_profiles", DEFAULT_VOICES)
+            st.subheader("Episode production manifest")
+            st.json(manifest)
+            st.download_button("⬇️ Download production JSON", json.dumps(manifest, ensure_ascii=False, indent=2), file_name=f"{safe_stem(title)}_production.json", mime="application/json", key="zee_download_manifest")
+            last = st.session_state.get("zee_last_episode_path")
+            if last and Path(last).exists():
+                st.video(last)
+                st.download_button("⬇️ Download last episode", Path(last).read_bytes(), file_name=Path(last).name, mime="video/mp4", key="zee_download_last")
+            st.caption("Caption Studio, Zi AI Assistant, AI Image Generation, Image Size Reducer and Zi Activator Pro are retained.")
 
 
 # ============================================================
