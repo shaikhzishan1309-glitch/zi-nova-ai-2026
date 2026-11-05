@@ -726,7 +726,7 @@ def generate_ai_image(prompt, aspect_ratio="1:1", image_size="1K", reference_ima
         input=request_input,
         response_format={
             "type": "image",
-            "mime_type": "image/png",
+            "mime_type": "image/jpeg",
             "aspect_ratio": aspect_ratio,
             "image_size": image_size
         }
