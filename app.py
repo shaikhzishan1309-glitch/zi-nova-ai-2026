@@ -1135,194 +1135,6 @@ def generate_free_hindi_cartoon(script_text, character="Village Hero", voice="hi
 # ============================================================
 
 
-def render_puter_image_generator(prompt, aspect_ratio="1:1"):
-    """Render Puter.js image generation in a browser iframe.
-
-    Puter.js is browser-authenticated (user-pays); no Puter API key is stored
-    in the Streamlit server or .env file. Generated images can be previewed
-    and downloaded in this iframe. They are not transferred into Python's
-    st.session_state.
-    """
-    safe_prompt = json.dumps(prompt)
-    safe_ratio = json.dumps(aspect_ratio)
-
-    component_html = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<script src="https://js.puter.com/v2/"></script>
-<style>
-*{box-sizing:border-box}body{margin:0;padding:14px;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1220;color:#e5e7eb}
-.panel{border:1px solid #263449;border-radius:14px;padding:16px;background:#111c2e;margin-bottom:12px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}label{display:block;font-size:13px;color:#aebbd0;margin-bottom:6px}
-textarea,select{width:100%;border:1px solid #35465f;border-radius:9px;background:#0b1424;color:#f8fafc;padding:10px;font:inherit}
-textarea{min-height:90px;resize:vertical}.field{flex:1;min-width:220px}
-button,.download{border:0;border-radius:9px;padding:10px 14px;background:#635bff;color:white;font-weight:650;cursor:pointer;text-decoration:none;display:inline-block}
-button:disabled{opacity:.5;cursor:not-allowed}.secondary{background:#263449}.muted{color:#9aa9bf;font-size:12px}
-#status{font-size:13px;color:#aebbd0;margin-top:10px;white-space:pre-wrap}.ok{color:#86efac!important}.bad{color:#fca5a5!important}
-#preview{display:none;width:100%;max-height:650px;object-fit:contain;background:#080d16;border-radius:10px;margin-top:12px}
-#download{display:none;margin-top:10px}.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.stat{background:#0b1424;border-radius:9px;padding:9px;font-size:12px}.stat b{display:block;color:#fff;margin-top:4px;overflow-wrap:anywhere}
-@media(max-width:600px){.stats{grid-template-columns:1fr 1fr}}
-</style>
-</head>
-<body>
-<div class="panel">
-  <div class="row" style="justify-content:space-between">
-    <strong>✦ Puter.js Image Studio</strong><span id="authState" class="muted">Checking sign-in…</span>
-  </div>
-  <div class="row" style="margin-top:12px">
-    <button id="signOut" class="secondary" type="button" style="display:none">Disconnect Puter account</button>
-  </div>
-</div>
-<div class="panel">
-  <label for="prompt">Image prompt</label>
-  <textarea id="prompt"></textarea>
-  <div class="row" style="margin-top:12px">
-    <div class="field">
-      <label for="model">Image model</label>
-      <select id="model">
-        <option value="default">GPT Image 2 — Low quality</option>
-        <option value="gemini-3.1-flash-image">Gemini 3.1 Flash Image</option>
-        <option value="grok-imagine-image">Grok Imagine Image</option>
-        <option value="@cf/black-forest-labs/flux-1-schnell">FLUX.1 Schnell (Cloudflare)</option>
-      </select>
-    </div>
-    <div style="align-self:end"><button id="generate" type="button">Generate image</button></div>
-  </div>
-  <p class="muted">No Puter API key is required. On first use, Puter.js may ask the visitor to authorize their own account. Later use normally reuses that browser session. Model availability, allowance and charges are controlled by Puter.</p>
-  <div id="status" role="status">Ready.</div>
-</div>
-<div class="panel">
-  <div class="row" style="justify-content:space-between"><strong>Generated image</strong><a id="download" class="download" download="zi_nova_puter_image.png">Download PNG</a></div>
-  <img id="preview" alt="Generated image preview">
-</div>
-<div class="panel">
-  <strong>Account usage verification</strong>
-  <div class="stats" style="margin-top:10px">
-    <div class="stat">Monthly allowance<b id="allowance">—</b></div>
-    <div class="stat">Remaining<b id="remaining">—</b></div>
-    <div class="stat">Last image cost<b id="cost">—</b></div>
-  </div>
-  <p class="muted">A displayed $0.0000 per image is not proof of unlimited free use. Check the allowance and account usage regularly.</p>
-  <button id="refresh" class="secondary" type="button">Refresh usage</button>
-</div>
-<script>
-const INITIAL_PROMPT = __PROMPT__;
-const RATIO = __RATIO__;
-const el = id => document.getElementById(id);
-const fmt = value => '$' + Number(value || 0).toFixed(4);
-let beforeUsage = null;
-function setStatus(message, cls=''){el('status').textContent=message;el('status').className=cls;}
-async function signedInUser(){
-  try { if (!puter.auth.isSignedIn()) return null; return await puter.auth.getUser(); }
-  catch(e){ return null; }
-}
-async function readUsage(){
-  try{
-    if(!puter.auth.isSignedIn()) return null;
-    const usage=await puter.auth.getMonthlyUsage();
-    return usage && usage.allowanceInfo ? usage.allowanceInfo : null;
-  }catch(e){return null;}
-}
-async function refreshAuth(){
-  const user=await signedInUser();
-  el('authState').textContent=user ? ('Connected: '+user.username) : 'Connects automatically on first use';
-  el('signOut').style.display=user?'inline-block':'none';
-  el('generate').disabled=false;
-  await refreshUsage();
-}
-async function refreshUsage(){
-  const info=await readUsage();
-  if(!info){el('allowance').textContent='Unavailable';el('remaining').textContent='Unavailable';return;}
-  el('allowance').textContent=fmt(info.monthUsageAllowance);
-  el('remaining').textContent=fmt(info.remaining);
-}
-el('signOut').addEventListener('click',async()=>{try{await puter.auth.signOut();await refreshAuth();}catch(e){setStatus('Disconnect failed: '+e.message,'bad');}});
-el('refresh').addEventListener('click',refreshUsage);
-el('prompt').value=INITIAL_PROMPT;
-el('generate').addEventListener('click',async()=>{
-  const prompt=el('prompt').value.trim();
-  if(!prompt){setStatus('Enter an image prompt.','bad');return;}
-  // Puter.js automatically starts its own authorization flow on the first
-  // cloud/AI request. Because this runs inside a click handler, popup auth
-  // is allowed by the browser. Existing sessions are reused automatically.
-  const model=el('model').value;
-  const options=model==='default'?{quality:'low'}:{model:model};
-  if(model==='gemini-3.1-flash-image') options.quality='512';
-  // Ratio is added to the natural-language prompt because txt2img options
-  // in the supplied working test project do not expose a ratio parameter.
-  const finalPrompt=prompt+' Compose the image in a '+RATIO+' aspect ratio.';
-  const button=el('generate');button.disabled=true;
-  el('preview').style.display='none';el('download').style.display='none';
-  el('cost').textContent='Checking…';
-  beforeUsage=await readUsage();
-  const started=performance.now();setStatus('Generating with '+(model==='default'?'GPT Image 2 (low)':model)+'…');
-  try{
-    const image=await puter.ai.txt2img(finalPrompt,{...options,test_mode:false});
-    if(!image) throw new Error('Puter returned no image.');
-
-    // Puter may return an image element backed by a temporary blob URL.
-    // Convert it to a self-contained data URL before preview/download so the
-    // image does not depend on a short-lived iframe-local object URL.
-    async function imageToDataUrl(result){
-      let source = typeof result === 'string' ? result : (result.src || result.url || '');
-      if (result instanceof HTMLImageElement && result.complete && result.naturalWidth > 0) {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = result.naturalWidth;
-          canvas.height = result.naturalHeight;
-          canvas.getContext('2d').drawImage(result, 0, 0);
-          return canvas.toDataURL('image/png');
-        } catch (canvasError) {
-          // Cross-origin images may block canvas export; try fetching the source below.
-        }
-      }
-      if (!source) throw new Error('Puter returned an image without a usable source.');
-      if (source.startsWith('data:image/')) return source;
-
-      const response = await fetch(source);
-      if (!response.ok) throw new Error('Could not retrieve the generated image (HTTP '+response.status+').');
-      const blob = await response.blob();
-      if (!blob.type.startsWith('image/')) throw new Error('Puter returned a non-image file.');
-      return await new Promise((resolve,reject)=>{
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error('Could not decode the generated image.'));
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    await refreshAuth();
-    const dataUrl = await imageToDataUrl(image);
-    const preview=el('preview');
-    await new Promise((resolve,reject)=>{
-      preview.onload=resolve;
-      preview.onerror=()=>reject(new Error('Image data was returned but the browser could not render the preview.'));
-      preview.src=dataUrl;
-    });
-    preview.style.display='block';
-    el('download').href=dataUrl;
-    el('download').style.display='inline-block';
-    const after=await readUsage();
-    if(beforeUsage&&after){const spent=Number(beforeUsage.remaining||0)-Number(after.remaining||0);el('cost').textContent=spent>0?fmt(spent):'< display precision';}
-    else el('cost').textContent='Unavailable';
-    setStatus('Image generated successfully in '+((performance.now()-started)/1000).toFixed(1)+' seconds. Dimensions: '+preview.naturalWidth+' × '+preview.naturalHeight+'.','ok');
-    await refreshUsage();
-  }catch(e){setStatus('Generation failed: '+(e.message||String(e)),'bad');el('cost').textContent='Not available';await refreshUsage();}
-  finally{button.disabled=false;}
-});
-if(typeof window.puter==='undefined'){
-  setStatus('Puter.js did not load. Check internet access or browser blocking.','bad');
-  el('generate').disabled=true;
-}else{refreshAuth();}
-</script>
-</body>
-</html>"""
-    component_html = component_html.replace("__PROMPT__", safe_prompt).replace("__RATIO__", safe_ratio)
-    components.html(component_html, height=900, scrolling=True)
-
-
 def search_web(query):
     try:
         from ddgs import DDGS
@@ -2453,14 +2265,13 @@ elif st.session_state.page == "Zi AI Assistant":
         st.title("🎨 AI Image Generator")
         st.caption(
             "Free-first setup: Cloudflare Workers AI is selected by default when configured. "
-            "Puter.js is an optional user-account route; Pollinations and Gemini remain available "
+            "Puter.js has been removed because its image-generation requests require account funding. "
             "only when configured and may consume account credits or incur charges."
         )
 
         available_providers = []
         if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
             available_providers.append("Free — Cloudflare FLUX.1 Schnell")
-        available_providers.append("Puter.js — Multi-model")
         if POLLINATIONS_API_KEY:
             available_providers.append("Pollinations — FLUX")
         if GEMINI_API_KEY:
@@ -2540,7 +2351,7 @@ elif st.session_state.page == "Zi AI Assistant":
             if selected_provider != "Premium — Google Gemini":
                 st.info(
                     "Reference-image editing is supported only by the configured Gemini provider. "
-                    "The reference image will not be sent to Puter, Cloudflare or Pollinations."
+                    "The reference image will not be sent to Cloudflare or Pollinations."
                 )
 
         style_instruction = (
@@ -2556,17 +2367,12 @@ elif st.session_state.page == "Zi AI Assistant":
               "and logos unless the prompt explicitly requests them."
         )
 
-        if selected_provider == "Puter.js — Multi-model":
-            st.info(
-                "Puter.js runs inside this panel. First-time visitors may be asked to authorize "
-                "their own Puter account on the first generation; returning visitors normally "
-                "reuse their browser session. No Puter API key is stored by Zi Nova AI. "
-                "Images can be previewed and downloaded here, but are not copied into Streamlit's Python session."
+        if not available_providers:
+            st.error(
+                "No image provider is configured. Add Cloudflare credentials for direct FLUX generation, "
+                "or configure Pollinations/Gemini credentials. Puter.js is intentionally not offered "
+                "because its image-generation service requested account funding."
             )
-            if not image_prompt.strip():
-                st.caption("Enter a prompt above, then generate from the Puter.js panel below.")
-            render_puter_image_generator(final_image_prompt, aspect_ratio=aspect_ratio)
-
         else:
             can_generate = bool(image_prompt.strip())
             if st.button(
